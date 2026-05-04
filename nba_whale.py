@@ -737,7 +737,7 @@ def show_verdict_block(prob: float, hit: float, df_r: pd.DataFrame,
     ))
     fig.update_layout(height=220, template="plotly_dark",
                       margin=dict(t=36, b=4, l=8, r=8))
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     st.caption("Score = 40% Poisson + 40% Hit Rate + 20% Forma. Non è consulenza finanziaria.")
 
 
@@ -800,7 +800,7 @@ def show_contropronostici(name: str, df_all: pd.DataFrame, n_window: int):
                           title=f"Stagionale (chiaro) vs Ultimi {n_window} (pieno)",
                           legend=dict(orientation="h", y=-0.28),
                           yaxis_title="Valore medio", showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1138,7 +1138,7 @@ def toolkit_pro_page(linee: dict, n_partite: int):
     t_base, t_ctx, t_adv = st.tabs(["Toolkit Base (40)", "Toolkit Contesto (50)", "Toolkit Avanzato (20)"])
     with t_base:
         tools_df = build_40_tools(name, df_all, df_r, linee)
-        st.dataframe(tools_df, use_container_width=True, hide_index=True)
+        st.dataframe(tools_df, width="stretch", hide_index=True)
         score_core = (
             float(tools_df.loc[tools_df["#"] == "13", "Valore"].iloc[0]) * 0.25
             + float(tools_df.loc[tools_df["#"] == "10", "Valore"].iloc[0]) * 0.25
@@ -1227,7 +1227,7 @@ def toolkit_pro_page(linee: dict, n_partite: int):
             expected_min_delta=float(expected_min_delta),
             b2b_flag=bool(b2b_flag),
         )
-        st.dataframe(ctx_df, use_container_width=True, hide_index=True)
+        st.dataframe(ctx_df, width="stretch", hide_index=True)
 
         prob_adj_pts = float(ctx_df.loc[ctx_df["#"] == "22", "Valore"].iloc[0])
         implied_prob = 100 / market_odds if market_odds > 1 else 0.0
@@ -1251,7 +1251,7 @@ def toolkit_pro_page(linee: dict, n_partite: int):
 
     with t_adv:
         adv_df = build_advanced_20_tools(df_all, df_r, linee)
-        st.dataframe(adv_df, use_container_width=True, hide_index=True)
+        st.dataframe(adv_df, width="stretch", hide_index=True)
         st.download_button(
             "⬇️ Esporta Toolkit Avanzato (20) CSV",
             data=df_to_csv(adv_df),
@@ -1442,10 +1442,10 @@ def bankroll_page():
                          line_color="#8B949E", annotation_text="Bankroll iniziale")
         fig_bk.update_layout(height=300, template="plotly_dark",
                              xaxis_title="Scommessa #", yaxis_title="€")
-        st.plotly_chart(fig_bk, use_container_width=True)
+        st.plotly_chart(fig_bk, width="stretch")
 
     st.markdown("#### 📄 Storico")
-    st.dataframe(df_bets, use_container_width=True, hide_index=True)
+    st.dataframe(df_bets, width="stretch", hide_index=True)
     col_del, col_exp = st.columns([1, 3])
     with col_del:
         if st.button("🗑️ Cancella tutto"):
@@ -1556,7 +1556,7 @@ def single_player_page(linee: dict, n_partite: int, n_slump: int):
                               annotation_text=f"Media {avg_v:.1f}")
                 fig.update_layout(height=360, template="plotly_dark",
                                   xaxis_title="Data", yaxis_title=STAT_LABELS[col])
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
     st.markdown("---")
 
     if "LOC" in df_r.columns:
@@ -1575,14 +1575,14 @@ def single_player_page(linee: dict, n_partite: int, n_slump: int):
         fig_ha.add_hline(y=linee["PTS"], line_dash="dash", line_color="#FF5252")
         fig_ha.update_layout(height=280, template="plotly_dark",
                              title="Distribuzione PTS per Sede")
-        st.plotly_chart(fig_ha, use_container_width=True)
+        st.plotly_chart(fig_ha, width="stretch")
         st.markdown("---")
 
     st.subheader("📄 Log Partite Recenti")
     display_cols = [c for c in ["GAME_DATE","MATCHUP","LOC","PTS","REB","AST","STL","BLK","TOV","MIN"]
                     if c in df_r.columns]
     st.dataframe(df_r[display_cols].reset_index(drop=True),
-                 use_container_width=True)
+                 width="stretch")
 
     ex1, ex2 = st.columns(2)
     with ex1:
@@ -1597,7 +1597,7 @@ def single_player_page(linee: dict, n_partite: int, n_slump: int):
     st.markdown("---")
     st.subheader("🧠 Extra 10 Tool")
     extra_df = build_extra_10_tools(df_r, df_all, linee)
-    st.dataframe(extra_df, use_container_width=True, hide_index=True)
+    st.dataframe(extra_df, width="stretch", hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1692,7 +1692,7 @@ def comparison_page(linee: dict, n_partite: int, n_slump: int):
             fig.update_layout(height=360, template="plotly_dark",
                               xaxis_title="Data", yaxis_title=STAT_LABELS.get(col, col),
                               legend=dict(orientation="h", y=1.12))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
 
     st.subheader("📊 Distribuzione Punti")
     fig_h = go.Figure()
@@ -1703,7 +1703,7 @@ def comparison_page(linee: dict, n_partite: int, n_slump: int):
     fig_h.add_vline(x=linee["PTS"], line_dash="dash", line_color="white")
     fig_h.update_layout(barmode="overlay", height=300, template="plotly_dark",
                         xaxis_title="Punti", yaxis_title="Frequenza")
-    st.plotly_chart(fig_h, use_container_width=True)
+    st.plotly_chart(fig_h, width="stretch")
 
     st.subheader("📋 Riepilogo Statistico")
     summary = pd.DataFrame({
@@ -1719,7 +1719,7 @@ def comparison_page(linee: dict, n_partite: int, n_slump: int):
              f"{df2['PTS'].max():.0f}" if "PTS" in df2.columns else "—",
              f"{df2['PTS'].min():.0f}" if "PTS" in df2.columns else "—"],
     })
-    st.dataframe(summary, use_container_width=True, hide_index=True)
+    st.dataframe(summary, width="stretch", hide_index=True)
 
 
 @st.cache_data(ttl=1800)
@@ -2093,7 +2093,7 @@ def teams_comparison_page(n_partite: int):
         line=dict(color="#FF5252", width=2.5)
     ))
     fig.update_layout(height=340, template="plotly_dark", xaxis_title="Data", yaxis_title="Punti")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
     st.subheader("📋 Riepilogo confronto squadre")
     summary = pd.DataFrame({
@@ -2115,7 +2115,7 @@ def teams_comparison_page(n_partite: int):
             f"{d2['PF'].min():.0f}",
         ],
     })
-    st.dataframe(summary, use_container_width=True, hide_index=True)
+    st.dataframe(summary, width="stretch", hide_index=True)
 
     st.markdown("---")
     st.subheader("🤝 Testa a Testa: Attacco/Difesa")
@@ -2159,7 +2159,7 @@ def teams_comparison_page(n_partite: int):
         team1_label: [f"{t1_base_att:.1f}", f"{t1_h2h_att:.1f}", f"{t1_att_delta:+.1f}", f"{t1_base_def:.1f}", f"{t1_h2h_def:.1f}", f"{t1_def_delta:+.1f}"],
         team2_label: [f"{t2_base_att:.1f}", f"{t2_h2h_att:.1f}", f"{t2_att_delta:+.1f}", f"{t2_base_def:.1f}", f"{t2_h2h_def:.1f}", f"{t2_def_delta:+.1f}"],
     })
-    st.dataframe(h2h_summary, use_container_width=True, hide_index=True)
+    st.dataframe(h2h_summary, width="stretch", hide_index=True)
 
 
 def _value_label(edge: float):
@@ -2417,7 +2417,7 @@ def value_alerts_page(linee: dict, n_partite: int):
             return
         st.success(f"Trovate {len(df_auto)} value bet OVER reali (linee + quote da bookmakers).")
         st.caption("Solo segnali OVER (compatibili con Eplay24). Under disabilitati.")
-        st.dataframe(df_auto, use_container_width=True, hide_index=True)
+        st.dataframe(df_auto, width="stretch", hide_index=True)
 
         top = df_auto.head(5)
         st.markdown("#### 🔥 Top 5 Pick reali")
@@ -2576,7 +2576,7 @@ def value_alerts_page(linee: dict, n_partite: int):
     st.success(f"Trovate {len(df_alert)} opportunità value ({scope_lbl}).")
     if scan_all_today:
         st.caption(f"Filtro orario attivo: {time_mode}")
-    st.dataframe(df_alert, use_container_width=True, hide_index=True)
+    st.dataframe(df_alert, width="stretch", hide_index=True)
 
     top = df_alert.head(5)
     st.markdown("#### 🔥 Top 5 Alert")
@@ -2659,7 +2659,7 @@ def health_page():
                 st.warning("Roster vuoto dall'API.")
             else:
                 st.success(f"Roster OK · {len(df_roster)} giocatori.")
-                st.dataframe(df_roster, use_container_width=True, hide_index=True)
+                st.dataframe(df_roster, width="stretch", hide_index=True)
 
     st.markdown("---")
     st.markdown("#### 🧹 Cache")
@@ -2690,7 +2690,7 @@ def health_page():
             [{"ID": pid, "Nomi": ", ".join(names)}
              for pid, names in sorted(integ["collisions"].items())]
         )
-        st.dataframe(coll, use_container_width=True, hide_index=True)
+        st.dataframe(coll, width="stretch", hide_index=True)
 
     st.markdown("---")
     st.markdown("#### 📡 Stato configurazione")
@@ -2702,7 +2702,7 @@ def health_page():
         {"Parametro": "Stagione", "Valore": SEASON},
         {"Parametro": "Versione app", "Valore": VERSION},
     ])
-    st.dataframe(cfg, use_container_width=True, hide_index=True)
+    st.dataframe(cfg, width="stretch", hide_index=True)
 
 
 def tipster_dashboard_page():
@@ -2747,7 +2747,7 @@ def tipster_dashboard_page():
         per_stat["Win%"] = (per_stat["wins"] / per_stat["n"] * 100).round(0)
         per_stat["ROI%"] = (per_stat["pnl"] / per_stat["stake"] * 100).round(1)
         st.markdown("#### Per tipologia")
-        st.dataframe(per_stat, use_container_width=True, hide_index=True)
+        st.dataframe(per_stat, width="stretch", hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
