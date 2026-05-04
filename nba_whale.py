@@ -2186,22 +2186,53 @@ def comparison_page(linee: dict, n_partite: int, n_slump: int):
     with cc2: show_contropronostici(n2, df2_all, min(n_slump, len(df2_all)))
     st.markdown("---")
 
-    st.subheader("📈 Trend Diretto")
+    st.subheader("📊 Trend Diretto")
+    st.caption("Confronto a barre raggruppate · ogni gruppo = 1 partita (G1 = più recente). "
+               "Linea bianca tratteggiata = la tua linea Over/Under.")
     gt1, gt2, gt3 = st.tabs(["Punti","Rimbalzi","Assist"])
-    for tab, col, linea in [(gt1,"PTS",linee["PTS"]),(gt2,"REB",linee["REB"]),(gt3,"AST",linee["AST"])]:
+    for tab, col, linea in [
+        (gt1, "PTS", linee["PTS"]),
+        (gt2, "REB", linee["REB"]),
+        (gt3, "AST", linee["AST"]),
+    ]:
         with tab:
+            n_pairs = min(len(df1), len(df2))
+            if n_pairs == 0 or col not in df1.columns or col not in df2.columns:
+                st.info("Dati insufficienti per il confronto su questa stat.")
+                continue
+            v1 = df1[col].astype(float).head(n_pairs).reset_index(drop=True)
+            v2 = df2[col].astype(float).head(n_pairs).reset_index(drop=True)
+            x_labels = [f"G{i+1}" for i in range(n_pairs)]
+
+            wins1 = int((v1 > v2).sum())
+            wins2 = int((v2 > v1).sum())
+            ties  = n_pairs - wins1 - wins2
+            over1 = int((v1 > linea).sum())
+            over2 = int((v2 > linea).sum())
+
+            k1, k2, k3 = st.columns(3)
+            k1.metric(f"H2H · {n1}", f"{wins1}/{n_pairs}",
+                      delta=f"{wins1-wins2:+d}" if wins1 != wins2 else "pari")
+            k2.metric(f"H2H · {n2}", f"{wins2}/{n_pairs}")
+            k3.metric("Over la linea", f"{n1}: {over1} · {n2}: {over2}")
+
             fig = go.Figure()
-            for df_x, nm, cx in [(df1,n1,C1),(df2,n2,C2)]:
-                if col in df_x.columns:
-                    fig.add_trace(go.Scatter(x=df_x["GAME_DATE"], y=df_x[col],
-                                             mode="lines+markers", name=nm,
-                                             line=dict(color=cx, width=2.5),
-                                             marker=dict(size=7)))
+            fig.add_trace(go.Bar(x=x_labels, y=v1, name=n1, marker_color=C1,
+                                 text=[f"{v:.0f}" for v in v1], textposition="outside",
+                                 hovertemplate=f"<b>{n1}</b> · %{{x}}<br>{STAT_LABELS.get(col,col)}: %{{y}}<extra></extra>"))
+            fig.add_trace(go.Bar(x=x_labels, y=v2, name=n2, marker_color=C2,
+                                 text=[f"{v:.0f}" for v in v2], textposition="outside",
+                                 hovertemplate=f"<b>{n2}</b> · %{{x}}<br>{STAT_LABELS.get(col,col)}: %{{y}}<extra></extra>"))
             fig.add_hline(y=linea, line_dash="dash", line_color="white",
-                          annotation_text=f"Linea {linea}")
-            fig.update_layout(height=360, template="plotly_dark",
-                              xaxis_title="Data", yaxis_title=STAT_LABELS.get(col, col),
-                              legend=dict(orientation="h", y=1.12))
+                          annotation_text=f"Linea {linea}",
+                          annotation_position="top right")
+            fig.update_layout(
+                height=400, template="plotly_dark",
+                barmode="group", bargap=0.18, bargroupgap=0.05,
+                xaxis_title="", yaxis_title=STAT_LABELS.get(col, col),
+                legend=dict(orientation="h", y=1.12),
+                margin=dict(t=40, b=40, l=40, r=20),
+            )
             st.plotly_chart(fig, width="stretch")
 
     st.subheader("📊 Distribuzione Punti")
@@ -2215,21 +2246,191 @@ def comparison_page(linee: dict, n_partite: int, n_slump: int):
                         xaxis_title="Punti", yaxis_title="Frequenza")
     st.plotly_chart(fig_h, width="stretch")
 
-    st.subheader("📋 Riepilogo Statistico")
-    summary = pd.DataFrame({
-        "Statistica": ["Media PTS","Prob. Over PTS %","Hit Rate PTS %",
-                       "Media REB","Prob. Over REB %","Media AST","Prob. Over AST %",
-                       "Max PTS","Min PTS"],
-        n1: [f"{avg1_pts:.1f}", f"{prob1_pts:.1f}%", f"{hit1_pts:.0f}%",
-             f"{avg1_reb:.1f}", f"{prob1_reb:.1f}%", f"{avg1_ast:.1f}", f"{prob1_ast:.1f}%",
-             f"{df1['PTS'].max():.0f}" if "PTS" in df1.columns else "—",
-             f"{df1['PTS'].min():.0f}" if "PTS" in df1.columns else "—"],
-        n2: [f"{avg2_pts:.1f}", f"{prob2_pts:.1f}%", f"{hit2_pts:.0f}%",
-             f"{avg2_reb:.1f}", f"{prob2_reb:.1f}%", f"{avg2_ast:.1f}", f"{prob2_ast:.1f}%",
-             f"{df2['PTS'].max():.0f}" if "PTS" in df2.columns else "—",
-             f"{df2['PTS'].min():.0f}" if "PTS" in df2.columns else "—"],
-    })
-    st.dataframe(summary, width="stretch", hide_index=True)
+    st.subheader("📋 Riepilogo Statistico Completo")
+    st.caption(f"Confronto su ultime {min(n_eff1, n_eff2)} partite. "
+               f"Colonna **Migliore** indica chi spunta meglio per ogni metrica "
+               f"(🟢 = {n1}, 🔴 = {n2}, ⚖️ = pareggio).")
+
+    def _pick_winner(v_a, v_b, higher_is_better=True, tol=0.0):
+        try:
+            a, b = float(v_a), float(v_b)
+        except Exception:
+            return "⚖️"
+        if abs(a - b) <= tol:
+            return "⚖️"
+        if higher_is_better:
+            return f"🟢 {n1}" if a > b else f"🔴 {n2}"
+        else:
+            return f"🟢 {n1}" if a < b else f"🔴 {n2}"
+
+    def _fmt(v, suffix=""):
+        try:
+            return f"{float(v):.1f}{suffix}"
+        except Exception:
+            return "—"
+
+    def _fmt_int(v, suffix=""):
+        try:
+            return f"{float(v):.0f}{suffix}"
+        except Exception:
+            return "—"
+
+    def _safe_stat(df, col, fn, default=0.0):
+        if col not in df.columns or df.empty:
+            return default
+        s = pd.to_numeric(df[col], errors="coerce").dropna()
+        if s.empty:
+            return default
+        return float(fn(s))
+
+    # Aggregati per giocatore 1
+    p1 = {
+        "PTS": {
+            "media":    _safe_stat(df1, "PTS", lambda s: s.mean()),
+            "mediana":  _safe_stat(df1, "PTS", lambda s: s.median()),
+            "std":      _safe_stat(df1, "PTS", lambda s: s.std(ddof=0)),
+            "max":      _safe_stat(df1, "PTS", lambda s: s.max()),
+            "min":      _safe_stat(df1, "PTS", lambda s: s.min()),
+            "over_n":   int((df1["PTS"] > linee["PTS"]).sum()) if "PTS" in df1.columns else 0,
+            "totale":   int(len(df1)),
+        },
+        "REB": {
+            "media":   _safe_stat(df1, "REB", lambda s: s.mean()),
+            "mediana": _safe_stat(df1, "REB", lambda s: s.median()),
+            "max":     _safe_stat(df1, "REB", lambda s: s.max()),
+            "min":     _safe_stat(df1, "REB", lambda s: s.min()),
+            "over_n":  int((df1["REB"] > linee["REB"]).sum()) if "REB" in df1.columns else 0,
+        },
+        "AST": {
+            "media":   _safe_stat(df1, "AST", lambda s: s.mean()),
+            "mediana": _safe_stat(df1, "AST", lambda s: s.median()),
+            "max":     _safe_stat(df1, "AST", lambda s: s.max()),
+            "min":     _safe_stat(df1, "AST", lambda s: s.min()),
+            "over_n":  int((df1["AST"] > linee["AST"]).sum()) if "AST" in df1.columns else 0,
+        },
+        "MIN": _safe_stat(df1, "MIN", lambda s: s.mean()),
+        "STL": _safe_stat(df1, "STL", lambda s: s.mean()),
+        "BLK": _safe_stat(df1, "BLK", lambda s: s.mean()),
+        "TOV": _safe_stat(df1, "TOV", lambda s: s.mean()),
+        "trend_pts": _last_n_avg(df1, "PTS", 3) - _last_n_avg(df1, "PTS", 10),
+        "consistency_pts": _consistency_index(df1, "PTS"),
+    }
+    p2 = {
+        "PTS": {
+            "media":    _safe_stat(df2, "PTS", lambda s: s.mean()),
+            "mediana":  _safe_stat(df2, "PTS", lambda s: s.median()),
+            "std":      _safe_stat(df2, "PTS", lambda s: s.std(ddof=0)),
+            "max":      _safe_stat(df2, "PTS", lambda s: s.max()),
+            "min":      _safe_stat(df2, "PTS", lambda s: s.min()),
+            "over_n":   int((df2["PTS"] > linee["PTS"]).sum()) if "PTS" in df2.columns else 0,
+            "totale":   int(len(df2)),
+        },
+        "REB": {
+            "media":   _safe_stat(df2, "REB", lambda s: s.mean()),
+            "mediana": _safe_stat(df2, "REB", lambda s: s.median()),
+            "max":     _safe_stat(df2, "REB", lambda s: s.max()),
+            "min":     _safe_stat(df2, "REB", lambda s: s.min()),
+            "over_n":  int((df2["REB"] > linee["REB"]).sum()) if "REB" in df2.columns else 0,
+        },
+        "AST": {
+            "media":   _safe_stat(df2, "AST", lambda s: s.mean()),
+            "mediana": _safe_stat(df2, "AST", lambda s: s.median()),
+            "max":     _safe_stat(df2, "AST", lambda s: s.max()),
+            "min":     _safe_stat(df2, "AST", lambda s: s.min()),
+            "over_n":  int((df2["AST"] > linee["AST"]).sum()) if "AST" in df2.columns else 0,
+        },
+        "MIN": _safe_stat(df2, "MIN", lambda s: s.mean()),
+        "STL": _safe_stat(df2, "STL", lambda s: s.mean()),
+        "BLK": _safe_stat(df2, "BLK", lambda s: s.mean()),
+        "TOV": _safe_stat(df2, "TOV", lambda s: s.mean()),
+        "trend_pts": _last_n_avg(df2, "PTS", 3) - _last_n_avg(df2, "PTS", 10),
+        "consistency_pts": _consistency_index(df2, "PTS"),
+    }
+
+    # higher_is_better: True per quasi tutto. False per TOV (perse) e std (volatilità).
+    rows = [
+        ("📍 PUNTI",               "",                "",                ""),
+        ("Media",                  _fmt(p1["PTS"]["media"]),    _fmt(p2["PTS"]["media"]),
+                                   _pick_winner(p1["PTS"]["media"],   p2["PTS"]["media"], True, 0.05)),
+        ("Mediana",                _fmt(p1["PTS"]["mediana"]),  _fmt(p2["PTS"]["mediana"]),
+                                   _pick_winner(p1["PTS"]["mediana"], p2["PTS"]["mediana"], True, 0.05)),
+        ("Deviazione std (volatilità)", _fmt(p1["PTS"]["std"]), _fmt(p2["PTS"]["std"]),
+                                   _pick_winner(p1["PTS"]["std"], p2["PTS"]["std"], False, 0.05)),
+        ("Massimo / Minimo",       f"{_fmt_int(p1['PTS']['max'])} / {_fmt_int(p1['PTS']['min'])}",
+                                   f"{_fmt_int(p2['PTS']['max'])} / {_fmt_int(p2['PTS']['min'])}", ""),
+        ("Probabilità Over (Poisson)", f"{prob1_pts:.1f}%",     f"{prob2_pts:.1f}%",
+                                   _pick_winner(prob1_pts, prob2_pts, True, 0.5)),
+        ("Hit Rate Over",          f"{hit1_pts:.0f}%",          f"{hit2_pts:.0f}%",
+                                   _pick_winner(hit1_pts, hit2_pts, True, 0.5)),
+        (f"Partite sopra linea {linee['PTS']}",
+                                   f"{p1['PTS']['over_n']}/{p1['PTS']['totale']}",
+                                   f"{p2['PTS']['over_n']}/{p2['PTS']['totale']}",
+                                   _pick_winner(p1['PTS']['over_n'], p2['PTS']['over_n'], True, 0)),
+        ("Trend ultime 3 vs 10",   _fmt(p1["trend_pts"]),       _fmt(p2["trend_pts"]),
+                                   _pick_winner(p1["trend_pts"], p2["trend_pts"], True, 0.1)),
+        ("Costanza (0-100)",       _fmt_int(p1["consistency_pts"]), _fmt_int(p2["consistency_pts"]),
+                                   _pick_winner(p1["consistency_pts"], p2["consistency_pts"], True, 1)),
+
+        ("📦 RIMBALZI",            "",                "",                ""),
+        ("Media",                  _fmt(p1["REB"]["media"]),    _fmt(p2["REB"]["media"]),
+                                   _pick_winner(p1["REB"]["media"], p2["REB"]["media"], True, 0.05)),
+        ("Mediana",                _fmt(p1["REB"]["mediana"]),  _fmt(p2["REB"]["mediana"]),
+                                   _pick_winner(p1["REB"]["mediana"], p2["REB"]["mediana"], True, 0.05)),
+        ("Massimo / Minimo",       f"{_fmt_int(p1['REB']['max'])} / {_fmt_int(p1['REB']['min'])}",
+                                   f"{_fmt_int(p2['REB']['max'])} / {_fmt_int(p2['REB']['min'])}", ""),
+        ("Probabilità Over (Poisson)", f"{prob1_reb:.1f}%",     f"{prob2_reb:.1f}%",
+                                   _pick_winner(prob1_reb, prob2_reb, True, 0.5)),
+        ("Hit Rate Over",          f"{hit1_reb:.0f}%",          f"{hit2_reb:.0f}%",
+                                   _pick_winner(hit1_reb, hit2_reb, True, 0.5)),
+        (f"Partite sopra linea {linee['REB']}",
+                                   f"{p1['REB']['over_n']}/{p1['PTS']['totale']}",
+                                   f"{p2['REB']['over_n']}/{p2['PTS']['totale']}",
+                                   _pick_winner(p1['REB']['over_n'], p2['REB']['over_n'], True, 0)),
+
+        ("🎁 ASSIST",              "",                "",                ""),
+        ("Media",                  _fmt(p1["AST"]["media"]),    _fmt(p2["AST"]["media"]),
+                                   _pick_winner(p1["AST"]["media"], p2["AST"]["media"], True, 0.05)),
+        ("Mediana",                _fmt(p1["AST"]["mediana"]),  _fmt(p2["AST"]["mediana"]),
+                                   _pick_winner(p1["AST"]["mediana"], p2["AST"]["mediana"], True, 0.05)),
+        ("Massimo / Minimo",       f"{_fmt_int(p1['AST']['max'])} / {_fmt_int(p1['AST']['min'])}",
+                                   f"{_fmt_int(p2['AST']['max'])} / {_fmt_int(p2['AST']['min'])}", ""),
+        ("Probabilità Over (Poisson)", f"{prob1_ast:.1f}%",     f"{prob2_ast:.1f}%",
+                                   _pick_winner(prob1_ast, prob2_ast, True, 0.5)),
+        ("Hit Rate Over",          f"{hit1_ast:.0f}%",          f"{hit2_ast:.0f}%",
+                                   _pick_winner(hit1_ast, hit2_ast, True, 0.5)),
+        (f"Partite sopra linea {linee['AST']}",
+                                   f"{p1['AST']['over_n']}/{p1['PTS']['totale']}",
+                                   f"{p2['AST']['over_n']}/{p2['PTS']['totale']}",
+                                   _pick_winner(p1['AST']['over_n'], p2['AST']['over_n'], True, 0)),
+
+        ("🛡️ DIFESA & GESTIONE",   "",                "",                ""),
+        ("Minuti medi",            _fmt(p1["MIN"]),             _fmt(p2["MIN"]),
+                                   _pick_winner(p1["MIN"], p2["MIN"], True, 0.5)),
+        ("Recuperi (STL)",         _fmt(p1["STL"]),             _fmt(p2["STL"]),
+                                   _pick_winner(p1["STL"], p2["STL"], True, 0.05)),
+        ("Stoppate (BLK)",         _fmt(p1["BLK"]),             _fmt(p2["BLK"]),
+                                   _pick_winner(p1["BLK"], p2["BLK"], True, 0.05)),
+        ("Perse (TOV) — meno è meglio", _fmt(p1["TOV"]),        _fmt(p2["TOV"]),
+                                   _pick_winner(p1["TOV"], p2["TOV"], False, 0.05)),
+    ]
+
+    summary_df = pd.DataFrame(rows, columns=["Statistica", n1, n2, "Migliore"])
+    st.dataframe(summary_df, width="stretch", hide_index=True)
+
+    # Verdetto finale aggregato (chi vince più metriche)
+    wins_count_1 = sum(1 for r in rows if isinstance(r[3], str) and r[3].startswith("🟢"))
+    wins_count_2 = sum(1 for r in rows if isinstance(r[3], str) and r[3].startswith("🔴"))
+    ties_count   = sum(1 for r in rows if r[3] == "⚖️")
+    cWin1, cWin2, cTie = st.columns(3)
+    cWin1.metric(f"Metriche vinte da {n1}", wins_count_1)
+    cWin2.metric(f"Metriche vinte da {n2}", wins_count_2)
+    cTie.metric("Pareggi", ties_count)
+    if wins_count_1 > wins_count_2:
+        st.success(f"🏆 **Vincitore complessivo: {n1}** ({wins_count_1} metriche su {wins_count_1+wins_count_2+ties_count})")
+    elif wins_count_2 > wins_count_1:
+        st.success(f"🏆 **Vincitore complessivo: {n2}** ({wins_count_2} metriche su {wins_count_1+wins_count_2+ties_count})")
+    else:
+        st.info("⚖️ Confronto in equilibrio: nessuno emerge nettamente.")
 
 
 @st.cache_data(ttl=1800)
