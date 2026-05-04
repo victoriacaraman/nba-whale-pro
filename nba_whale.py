@@ -15,11 +15,7 @@ from scipy.stats import poisson
 #  CONFIG
 # ══════════════════════════════════════════════════════════════════════════════
 
-st.set_page_config(page_title="NBA Whale Pro", layout="wide",
-                   initial_sidebar_state="auto",
-                   menu_items={"About": "NBA Whale Pro · analisi statistica NBA"})
-
-# ── PWA / Mobile (manifest inline + meta) ──────────────────────────────────
+# ── PWA / Mobile: icone (caricate prima di set_page_config per usarle come page_icon) ──
 def _load_icon_b64(path: str):
     try:
         import base64
@@ -28,9 +24,22 @@ def _load_icon_b64(path: str):
     except Exception:
         return ""
 
-_ICON_192 = _load_icon_b64(os.path.join(os.path.dirname(__file__), "icon-192.png")) if "__file__" in globals() else _load_icon_b64("icon-192.png")
-_ICON_512 = _load_icon_b64(os.path.join(os.path.dirname(__file__), "icon-512.png")) if "__file__" in globals() else _load_icon_b64("icon-512.png")
+_BASE_DIR  = os.path.dirname(__file__) if "__file__" in globals() else "."
+_ICON_PATH_192 = os.path.join(_BASE_DIR, "icon-192.png")
+_ICON_PATH_512 = os.path.join(_BASE_DIR, "icon-512.png")
+_ICON_192 = _load_icon_b64(_ICON_PATH_192)
+_ICON_512 = _load_icon_b64(_ICON_PATH_512)
 
+# page_icon: se trovo il PNG locale lo uso, altrimenti fallback emoji 🏀
+_PAGE_ICON = _ICON_PATH_192 if os.path.exists(_ICON_PATH_192) else "🏀"
+
+st.set_page_config(page_title="NBA Whale Pro",
+                   page_icon=_PAGE_ICON,
+                   layout="wide",
+                   initial_sidebar_state="auto",
+                   menu_items={"About": "NBA Whale Pro · analisi statistica NBA"})
+
+# ── PWA / Mobile (manifest inline + meta) ──────────────────────────────────
 _icon_entries = []
 if _ICON_192:
     _icon_entries.append('{"src":"data:image/png;base64,' + _ICON_192 + '","sizes":"192x192","type":"image/png","purpose":"any maskable"}')
@@ -50,6 +59,21 @@ _PWA_MANIFEST = (
     '}'
 )
 
+# Favicon (sostituisce quello di default di Streamlit)
+_favicon_192 = (
+    f'<link rel="icon" type="image/png" sizes="192x192" href="data:image/png;base64,{_ICON_192}">'
+    if _ICON_192 else ""
+)
+_favicon_512 = (
+    f'<link rel="icon" type="image/png" sizes="512x512" href="data:image/png;base64,{_ICON_512}">'
+    if _ICON_512 else ""
+)
+_shortcut_icon = (
+    f'<link rel="shortcut icon" type="image/png" href="data:image/png;base64,{_ICON_192}">'
+    if _ICON_192 else ""
+)
+
+# Apple-touch-icon (per "Aggiungi a Home" su iOS Safari)
 _apple_icon_tag = (
     f'<link rel="apple-touch-icon" sizes="192x192" href="data:image/png;base64,{_ICON_192}">'
     if _ICON_192 else ""
@@ -61,6 +85,9 @@ _apple_icon_512 = (
 
 _PWA_HEAD = f"""
 <link rel="manifest" href='data:application/manifest+json;utf8,{_PWA_MANIFEST}'>
+{_favicon_192}
+{_favicon_512}
+{_shortcut_icon}
 {_apple_icon_tag}
 {_apple_icon_512}
 <meta name="theme-color" content="#00D4AA">
