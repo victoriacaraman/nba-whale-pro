@@ -1167,6 +1167,118 @@ def _read_gap(val: float, stat_lbl: str) -> str:
     return f"🔴 Media molto sotto la linea ({val:+.1f} {stat_lbl}): segnale forte Under."
 
 
+def _extract_opponent(matchup) -> str:
+    """Estrae il codice della squadra avversaria da MATCHUP.
+    Formati gestiti: 'LAL vs BOS' → 'BOS', 'LAL @ BOS' → 'BOS'."""
+    if not isinstance(matchup, str):
+        return "?"
+    m = re.search(r"(?:vs|@)\s+([A-Za-z]{2,4})", matchup)
+    return m.group(1) if m else "?"
+
+
+def _parse_minutes(val) -> float:
+    """Converte 'MM' o 'MM:SS' in float minuti."""
+    if val is None:
+        return 0.0
+    s = str(val).strip()
+    if not s:
+        return 0.0
+    if ":" in s:
+        try:
+            mn, sc = s.split(":", 1)
+            return float(mn) + float(sc) / 60.0
+        except Exception:
+            return 0.0
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+
+def _diagnose_game(row: dict, season_avg_pts: float, season_std_pts: float,
+                   season_avg_min: float) -> list:
+    """Genera spiegazioni plausibili sul perché la performance devia dalla media stagionale.
+    Non possiamo sapere con certezza degli infortuni storici, ma usiamo segnali indiretti
+    (minutaggio, TOV, sede, gap rispetto alla media) per indicare le cause più probabili."""
+    pts = float(row.get("PTS", 0) or 0)
+    mins = _parse_minutes(row.get("MIN"))
+    tov  = float(row.get("TOV", 0) or 0)
+    loc  = row.get("LOC", "")
+    delta_pts = pts - season_avg_pts
+
+    reasons = []
+    # Minutaggio anomalo
+    if season_avg_min > 0 and mins < season_avg_min * 0.5 and mins > 0:
+        reasons.append(f"⏱️ minuti molto sotto media ({mins:.0f} vs ~{season_avg_min:.0f}): "
+                       "possibile gestione, infortunio, foul-trouble o blowout")
+    elif season_avg_min > 0 and mins > season_avg_min * 1.25:
+        reasons.append(f"💪 minuti elevati ({mins:.0f}): partita stretta o assenze nel suo team")
+
+    # Performance fuori scala (high)
+    if season_std_pts > 0 and delta_pts >= season_std_pts * 1.5 and pts > season_avg_pts:
+        reasons.append("🚀 serata top: forse rivale debole, assenze nell'avversario o ritmo elevato")
+    # Performance fuori scala (low)
+    if season_std_pts > 0 and delta_pts <= -season_std_pts * 1.5 and pts < season_avg_pts:
+        reasons.append("📉 serata sotto la media: difesa avversaria forte / ritmo basso / pressione")
+
+    # Turnover alti
+    if tov >= 5:
+        reasons.append(f"🚨 tante palle perse ({int(tov)}): forte pressione difensiva")
+
+    # Trasferta + sotto media
+    if loc == "Away" and pts < season_avg_pts - 2:
+        reasons.append("✈️ in trasferta: spesso rendimento più basso lontano da casa")
+
+    # Default se niente di rilevante
+    if not reasons:
+        reasons.append("📊 performance in linea con la sua media stagionale")
+    return reasons
+
+
+def build_opponent_breakdown(df_r: pd.DataFrame, df_all: pd.DataFrame,
+                             linee: dict) -> pd.DataFrame:
+    """Aggrega le performance per squadra avversaria (su df_r, le partite recenti)."""
+    if df_r.empty or "MATCHUP" not in df_r.columns:
+        return pd.DataFrame()
+    df = df_r.copy()
+    df["OPP"] = df["MATCHUP"].apply(_extract_opponent)
+    season_avg_pts = float(df_all["PTS"].mean()) if "PTS" in df_all.columns and not df_all.empty else 0.0
+
+    rows = []
+    for opp, sub in df.groupby("OPP"):
+        if not opp or opp == "?":
+            continue
+        n = len(sub)
+        avg_pts = float(sub["PTS"].mean()) if "PTS" in sub.columns else 0.0
+        avg_reb = float(sub["REB"].mean()) if "REB" in sub.columns else 0.0
+        avg_ast = float(sub["AST"].mean()) if "AST" in sub.columns else 0.0
+        max_pts = float(sub["PTS"].max()) if "PTS" in sub.columns else 0.0
+        min_pts = float(sub["PTS"].min()) if "PTS" in sub.columns else 0.0
+        hit_pts = float((sub["PTS"] > linee["PTS"]).mean() * 100) if "PTS" in sub.columns else 0.0
+        delta_vs_season = avg_pts - season_avg_pts
+        if delta_vs_season >= 2.0:
+            tag = "📈 sopra media"
+        elif delta_vs_season <= -2.0:
+            tag = "📉 sotto media"
+        else:
+            tag = "➡️ in media"
+        rows.append({
+            "Avversario": opp,
+            "Partite": n,
+            "Media PTS": round(avg_pts, 1),
+            "Media REB": round(avg_reb, 1),
+            "Media AST": round(avg_ast, 1),
+            "Max / Min PTS": f"{max_pts:.0f} / {min_pts:.0f}",
+            f"Hit Over {linee['PTS']}": f"{hit_pts:.0f}%",
+            "Delta vs media stagione": round(delta_vs_season, 1),
+            "Lettura": tag,
+        })
+    out = pd.DataFrame(rows)
+    if not out.empty:
+        out = out.sort_values("Media PTS", ascending=False).reset_index(drop=True)
+    return out
+
+
 def build_extra_10_tools(df_r: pd.DataFrame, df_all: pd.DataFrame, linee: dict):
     avg_pts  = float(df_r["PTS"].mean()) if "PTS" in df_r.columns and not df_r.empty else 0.0
     d_pts    = _recent_vs_season_delta(df_r, df_all, "PTS")
@@ -2065,6 +2177,100 @@ def single_player_page(linee: dict, n_partite: int, n_slump: int):
                                   bargap=0.25, showlegend=False,
                                   margin=dict(t=40, b=40, l=40, r=20))
                 st.plotly_chart(fig, width="stretch")
+    st.markdown("---")
+
+    # ── Performance per Squadra Avversaria ──────────────────────────────────
+    st.subheader("🆚 Performance per Squadra Avversaria")
+    st.caption("Come cambiano i suoi numeri a seconda dell'avversario (sulle ultime "
+               f"{n_eff} partite). Valori sopra/sotto la sua media stagionale segnalano "
+               "match favorevoli o difficili.")
+
+    opp_df = build_opponent_breakdown(df_r, df_all, linee)
+    season_avg_pts_global = float(df_all["PTS"].mean()) if "PTS" in df_all.columns and not df_all.empty else 0.0
+
+    if opp_df.empty:
+        st.info("Dati avversari insufficienti.")
+    else:
+        # Bar chart medie PTS per opponent (verde/rosso a seconda del delta vs media stagionale)
+        fig_opp = go.Figure()
+        bar_colors = []
+        for _, r in opp_df.iterrows():
+            d = float(r["Delta vs media stagione"])
+            if d >= 2:
+                bar_colors.append("#00D4AA")   # netto sopra
+            elif d <= -2:
+                bar_colors.append("#FF5252")   # netto sotto
+            else:
+                bar_colors.append("#FFD600")   # in linea
+        fig_opp.add_trace(go.Bar(
+            x=opp_df["Avversario"],
+            y=opp_df["Media PTS"],
+            marker_color=bar_colors,
+            text=[f"{v:.1f}" for v in opp_df["Media PTS"]],
+            textposition="outside",
+            customdata=opp_df[["Partite", "Delta vs media stagione"]].values,
+            hovertemplate="<b>%{x}</b><br>"
+                          "Media PTS: %{y:.1f}<br>"
+                          "Partite: %{customdata[0]}<br>"
+                          "Delta vs media stagione: %{customdata[1]:+.1f}<extra></extra>",
+        ))
+        fig_opp.add_hline(y=season_avg_pts_global, line_dash="dot", line_color="#FFD600",
+                          annotation_text=f"Media stagione {season_avg_pts_global:.1f}",
+                          annotation_position="bottom right")
+        fig_opp.add_hline(y=linee["PTS"], line_dash="dash", line_color="#FF5252",
+                          annotation_text=f"Linea {linee['PTS']}",
+                          annotation_position="top right")
+        fig_opp.update_layout(
+            height=380, template="plotly_dark",
+            xaxis_title="Squadra avversaria",
+            yaxis_title="Media PTS sulle partite vs quella squadra",
+            bargap=0.3, showlegend=False,
+            margin=dict(t=40, b=40, l=40, r=20),
+        )
+        st.plotly_chart(fig_opp, width="stretch")
+
+        st.dataframe(opp_df, width="stretch", hide_index=True)
+        st.caption("🟢 verde = media nettamente sopra la sua stagione · "
+                   "🔴 rosso = nettamente sotto · 🟡 giallo = in linea.")
+
+    # ── Partite anomale con possibili motivi ────────────────────────────────
+    if not df_r.empty and "PTS" in df_r.columns and "PTS" in df_all.columns:
+        season_avg_pts = float(df_all["PTS"].mean())
+        season_std_pts = float(df_all["PTS"].std(ddof=0)) if len(df_all) > 1 else 0.0
+        season_mins_series = df_all["MIN"].apply(_parse_minutes) if "MIN" in df_all.columns else pd.Series([0.0])
+        season_avg_min = float(season_mins_series.mean()) if not season_mins_series.empty else 0.0
+
+        if season_std_pts > 0:
+            df_r_sorted = df_r.sort_values("GAME_DATE", ascending=False).copy()
+            df_r_sorted["delta_pts"] = df_r_sorted["PTS"].astype(float) - season_avg_pts
+            df_r_sorted["abs_delta"] = df_r_sorted["delta_pts"].abs()
+            anomalies = df_r_sorted[df_r_sorted["abs_delta"] >= season_std_pts * 1.2]
+
+            if not anomalies.empty:
+                with st.expander(f"🔍 Partite anomale rilevate ({len(anomalies)}) — perché?", expanded=False):
+                    st.caption("Partite con PTS molto sopra/sotto la media stagionale "
+                               f"(soglia ±{season_std_pts*1.2:.1f} PTS). "
+                               "Le diagnosi sono ipotesi basate su minuti, perse, sede e gap dalla media.")
+                    for _, row in anomalies.head(8).iterrows():
+                        reasons = _diagnose_game(row, season_avg_pts, season_std_pts, season_avg_min)
+                        delta_pts = float(row["delta_pts"])
+                        opp = _extract_opponent(row.get("MATCHUP"))
+                        date_str = str(row.get("GAME_DATE", ""))
+                        loc = row.get("LOC", "")
+                        sign_color = "#00D4AA" if delta_pts > 0 else "#FF5252"
+                        st.markdown(
+                            f"<div style='border-left:3px solid {sign_color};padding:6px 12px;margin-bottom:8px;background:#161B22;border-radius:4px;'>"
+                            f"<strong>{date_str} · vs {opp} ({loc})</strong> · "
+                            f"<span style='color:{sign_color};font-weight:bold;'>"
+                            f"{int(row['PTS'])} PTS ({delta_pts:+.1f} vs media)</span><br>"
+                            + "<br>".join([f"&nbsp;&nbsp;{r}" for r in reasons])
+                            + "</div>",
+                            unsafe_allow_html=True,
+                        )
+                    if len(anomalies) > 8:
+                        st.caption(f"…e altre {len(anomalies)-8} partite anomale non mostrate.")
+            else:
+                st.caption("✅ Nessuna partita anomala rilevata: rendimento costante.")
     st.markdown("---")
 
     if "LOC" in df_r.columns:
