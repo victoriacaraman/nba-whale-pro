@@ -1,5 +1,6 @@
 import os
 import io
+import json
 import datetime
 import difflib
 import math
@@ -82,6 +83,17 @@ MAX_RETRIES = 3
 EPLAY24_BASE_URL = "https://www.eplay24.com"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
 ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "d0610cb7c6f61f3424a82d4d2e56c4e3")
+
+# ── Telegram bot (opzionale, per notifiche value alert) ────────────────────
+TELEGRAM_API_BASE   = "https://api.telegram.org"
+TELEGRAM_BOT_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID    = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+# ── Persistenza bankroll su file (effimera su Streamlit Cloud, persistente in locale) ──
+BANKROLL_FILE = os.path.join(
+    os.path.dirname(__file__) if "__file__" in globals() else ".",
+    "bankroll_data.json",
+)
 
 st.markdown("""
 <style>
@@ -1365,17 +1377,163 @@ def export_summary(name, df_r, df_all, linee, n):
 #  BANKROLL TRACKER
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _load_bankroll_state():
+    """Legge bankroll_start e bets dal file JSON (se esiste)."""
+    try:
+        if os.path.exists(BANKROLL_FILE):
+            with open(BANKROLL_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+            return (
+                float(data.get("bankroll_start", 1000.0)),
+                list(data.get("bets", [])),
+            )
+    except Exception:
+        pass
+    return 1000.0, []
+
+
+def _save_bankroll_state() -> bool:
+    """Persiste bankroll_start e bets su file JSON. Su Streamlit Cloud il
+    filesystem è effimero (al redeploy si perde): usare l'export CSV come backup."""
+    try:
+        data = {
+            "bankroll_start": float(st.session_state.get("bankroll_start", 1000.0)),
+            "bets": list(st.session_state.get("bets", [])),
+            "saved_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "version": VERSION,
+        }
+        with open(BANKROLL_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
 def init_bankroll():
-    if "bankroll_start" not in st.session_state:
-        st.session_state.bankroll_start = 1000.0
-    if "bets" not in st.session_state:
-        st.session_state.bets = []
+    if "bankroll_start" not in st.session_state or "bets" not in st.session_state:
+        bk_start, bets = _load_bankroll_state()
+        if "bankroll_start" not in st.session_state:
+            st.session_state.bankroll_start = bk_start
+        if "bets" not in st.session_state:
+            st.session_state.bets = bets
+
+
+# ── Telegram notifications ────────────────────────────────────────────────────
+def _get_telegram_creds():
+    """Ritorna (token, chat_id) con priorità: parametri runtime (session_state) → env."""
+    token = st.session_state.get("tg_token_override", "") or TELEGRAM_BOT_TOKEN
+    chat  = st.session_state.get("tg_chat_override", "")  or TELEGRAM_CHAT_ID
+    return (token or "").strip(), (chat or "").strip()
+
+
+def send_telegram_message(text: str, bot_token: str = "", chat_id: str = "",
+                          parse_mode: str = "HTML"):
+    """Invia un messaggio al bot Telegram. Ritorna (ok: bool, info: str)."""
+    if not bot_token or not chat_id:
+        tk, ch = _get_telegram_creds()
+        bot_token = (bot_token or tk).strip()
+        chat_id   = (chat_id   or ch).strip()
+    bot_token = (bot_token or "").strip()
+    chat_id   = (chat_id or "").strip()
+    if not bot_token or not chat_id:
+        return False, "Telegram non configurato (token / chat_id mancanti)."
+    if not text:
+        return False, "Messaggio vuoto."
+    url = f"{TELEGRAM_API_BASE}/bot{bot_token}/sendMessage"
+    # Telegram limite messaggio ~4096 char: tronchiamo per sicurezza
+    payload = {
+        "chat_id": chat_id,
+        "text": text[:4000],
+        "parse_mode": parse_mode,
+        "disable_web_page_preview": True,
+    }
+    try:
+        r = requests.post(url, json=payload, timeout=REQ_TIMEOUT)
+        if r.status_code == 200 and r.json().get("ok"):
+            return True, "Messaggio inviato."
+        try:
+            desc = r.json().get("description", r.text)
+        except Exception:
+            desc = r.text
+        return False, f"HTTP {r.status_code}: {desc}"
+    except requests.RequestException as exc:
+        return False, f"Errore rete: {exc}"
+    except Exception as exc:
+        return False, f"Errore: {exc}"
+
+
+def _format_alerts_for_telegram(df: pd.DataFrame, max_rows: int = 10,
+                                title: str = "🚨 Value Alert NBA",
+                                source: str = "Manuale") -> str:
+    """Costruisce il testo HTML da inviare su Telegram."""
+    if df is None or df.empty:
+        return ""
+    today = datetime.date.today().strftime("%d/%m/%Y")
+    lines = [f"<b>{title}</b> · {today} · <i>{source}</i>"]
+    for _, r in df.head(max_rows).iterrows():
+        giocatore = r.get("Giocatore", "?")
+        stat      = r.get("Stat", "")
+        linea     = r.get("Linea", "?")
+        odd       = r.get("Quota Over", r.get("Quota", "?"))
+        prob      = r.get("Prob Over %", "?")
+        edge      = r.get("Edge %", "?")
+        kelly     = r.get("Kelly €", 0) or 0
+        signal    = r.get("Signal", "")
+        bookmaker = r.get("Bookmaker", "")
+        match     = r.get("Match", "")
+        team      = r.get("Team", "")
+        meta_bits = [b for b in [bookmaker, team, match] if b]
+        meta = " · ".join(meta_bits)
+        try:
+            kelly_str = f"€{float(kelly):.2f}"
+        except Exception:
+            kelly_str = "—"
+        line = (
+            f"\n• <b>{giocatore}</b> {stat} OVER {linea} @ <b>{odd}</b>"
+            f"\n   Prob {prob}% · Edge {edge}% · Kelly {kelly_str} · {signal}"
+        )
+        if meta:
+            line += f"\n   <i>{meta}</i>"
+        lines.append(line)
+    lines.append(f"\n<i>NBA Whale Pro v{VERSION}</i>")
+    return "\n".join(lines)
+
+
+def _recompute_bet_pnl(bet: dict) -> dict:
+    """Ricalcola P&L coerentemente con stake/quota/risultato."""
+    stake = float(bet.get("Stake €", 0) or 0)
+    quota = float(bet.get("Quota", 0) or 0)
+    res   = bet.get("Risultato", "In attesa")
+    if res == "Vinto":
+        bet["P&L €"] = round(stake * (quota - 1), 2)
+    elif res == "Perso":
+        bet["P&L €"] = round(-stake, 2)
+    else:
+        bet["P&L €"] = 0.0
+    return bet
 
 
 def bankroll_page():
     init_bankroll()
     st.subheader("💰 Tracker Bankroll")
-    st.caption("Registra le scommesse e monitora P&L, ROI e win rate in tempo reale.")
+    st.caption("Registra le scommesse e monitora P&L, ROI e win rate in tempo reale. "
+               "Auto-salvataggio su file locale; CSV come backup definitivo.")
+
+    if os.path.exists(BANKROLL_FILE):
+        try:
+            mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(BANKROLL_FILE))
+            st.caption(f"💾 Auto-save attivo · ultimo salvataggio {mod_time.strftime('%d/%m/%Y %H:%M:%S')}")
+        except Exception:
+            pass
+    else:
+        st.caption("💾 Auto-save attivo (il file verrà creato al primo inserimento).")
+
+    st.warning(
+        "ℹ️ Su **Streamlit Cloud** il filesystem è effimero: ad ogni redeploy il file "
+        "`bankroll_data.json` viene resettato. Esporta regolarmente il **CSV** come backup "
+        "e usa **Importa CSV** per ripristinare lo storico dopo un redeploy.",
+        icon="⚠️",
+    )
 
     with st.expander("⚙️ Bankroll iniziale", expanded=len(st.session_state.bets) == 0):
         new_start = st.number_input("Bankroll iniziale (€)",
@@ -1383,6 +1541,7 @@ def bankroll_page():
                                     min_value=1.0, step=50.0)
         if st.button("Aggiorna bankroll"):
             st.session_state.bankroll_start = new_start
+            _save_bankroll_state()
             st.rerun()
 
     st.markdown("#### ➕ Registra Scommessa")
@@ -1406,11 +1565,33 @@ def bankroll_page():
                 "Quota": quota, "Stake €": stake, "Risultato": vinto,
                 "P&L €": profit, "Note": note,
             })
-            st.success(f"✅ Scommessa su {giocatore} registrata!")
+            _save_bankroll_state()
+            st.success(f"✅ Scommessa su {giocatore} registrata e salvata.")
             st.rerun()
 
     if not st.session_state.bets:
         st.info("Nessuna scommessa ancora. Usare il form sopra per iniziare.")
+        # Importa CSV anche con storico vuoto (utile per ripristino dopo redeploy)
+        st.markdown("#### 📤 Importa storico da CSV")
+        up = st.file_uploader("Carica CSV scommesse (esportato in precedenza)",
+                              type=["csv"], key="bk_import_empty")
+        if up is not None:
+            try:
+                df_in = pd.read_csv(up)
+                required = {"Data", "Giocatore", "Stat", "Tipo", "Linea", "Quota",
+                            "Stake €", "Risultato"}
+                if not required.issubset(set(df_in.columns)):
+                    st.error(f"Colonne mancanti. Servono: {sorted(required)}")
+                else:
+                    rows = df_in.to_dict("records")
+                    for row in rows:
+                        _recompute_bet_pnl(row)
+                    st.session_state.bets = rows
+                    _save_bankroll_state()
+                    st.success(f"✅ Importate {len(rows)} scommesse.")
+                    st.rerun()
+            except Exception as exc:
+                st.error(f"Errore import CSV: {exc}")
         return
 
     df_bets = pd.DataFrame(st.session_state.bets)
@@ -1444,17 +1625,75 @@ def bankroll_page():
                              xaxis_title="Scommessa #", yaxis_title="€")
         st.plotly_chart(fig_bk, width="stretch")
 
+    # ── Editor scommesse pendenti ───────────────────────────────────────────
+    pendenti_idx = [i for i, b in enumerate(st.session_state.bets)
+                    if b.get("Risultato", "In attesa") == "In attesa"]
+    if pendenti_idx:
+        with st.expander(f"✏️ Aggiorna risultato pendenti ({len(pendenti_idx)})", expanded=False):
+            for i in pendenti_idx:
+                b = st.session_state.bets[i]
+                cols = st.columns([3, 2, 2, 2])
+                cols[0].markdown(
+                    f"**{b.get('Giocatore', '?')}** · {b.get('Stat', '')} {b.get('Tipo', '')} "
+                    f"{b.get('Linea', '?')} @ {b.get('Quota', '?')} · stake €{b.get('Stake €', 0)} "
+                    f"<span style='color:#8B949E'>({b.get('Data','')})</span>",
+                    unsafe_allow_html=True,
+                )
+                if cols[1].button("✅ Vinto", key=f"win_{i}"):
+                    b["Risultato"] = "Vinto"
+                    _recompute_bet_pnl(b)
+                    _save_bankroll_state()
+                    st.rerun()
+                if cols[2].button("❌ Perso", key=f"lose_{i}"):
+                    b["Risultato"] = "Perso"
+                    _recompute_bet_pnl(b)
+                    _save_bankroll_state()
+                    st.rerun()
+                if cols[3].button("🗑️ Rimuovi", key=f"rem_{i}"):
+                    st.session_state.bets.pop(i)
+                    _save_bankroll_state()
+                    st.rerun()
+
     st.markdown("#### 📄 Storico")
     st.dataframe(df_bets, width="stretch", hide_index=True)
-    col_del, col_exp = st.columns([1, 3])
+
+    col_del, col_exp, col_imp = st.columns([1, 2, 2])
     with col_del:
         if st.button("🗑️ Cancella tutto"):
             st.session_state.bets = []
+            _save_bankroll_state()
             st.rerun()
     with col_exp:
         st.download_button("⬇️ Esporta CSV Scommesse", data=df_to_csv(df_bets),
                            file_name=f"bankroll_{datetime.date.today()}.csv",
                            mime="text/csv")
+    with col_imp:
+        up = st.file_uploader("📤 Importa CSV (sostituisce o accoda)",
+                              type=["csv"], key="bk_import_full")
+        if up is not None:
+            mode_imp = st.radio("Modalità import",
+                                ["Accoda allo storico", "Sostituisci storico"],
+                                horizontal=True, key="bk_import_mode")
+            if st.button("Conferma import", key="bk_import_confirm"):
+                try:
+                    df_in = pd.read_csv(up)
+                    required = {"Data", "Giocatore", "Stat", "Tipo", "Linea", "Quota",
+                                "Stake €", "Risultato"}
+                    if not required.issubset(set(df_in.columns)):
+                        st.error(f"Colonne mancanti. Servono: {sorted(required)}")
+                    else:
+                        rows = df_in.to_dict("records")
+                        for row in rows:
+                            _recompute_bet_pnl(row)
+                        if mode_imp == "Sostituisci storico":
+                            st.session_state.bets = rows
+                        else:
+                            st.session_state.bets.extend(rows)
+                        _save_bankroll_state()
+                        st.success(f"✅ Importate {len(rows)} righe ({mode_imp.lower()}).")
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"Errore import CSV: {exc}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2434,6 +2673,8 @@ def value_alerts_page(linee: dict, n_partite: int):
             file_name=f"alert_value_real_{datetime.date.today()}.csv",
             mime="text/csv",
         )
+        _telegram_alert_block(df_auto, source="Auto · Odds API",
+                              key_prefix="tg_auto", default_top=5)
         return
 
     # init default odds session keys
@@ -2593,6 +2834,48 @@ def value_alerts_page(linee: dict, n_partite: int):
         file_name=f"alert_value_{datetime.date.today()}.csv",
         mime="text/csv",
     )
+    _telegram_alert_block(df_alert, source="Manuale", key_prefix="tg_man", default_top=5)
+
+
+def _telegram_alert_block(df_alert: pd.DataFrame, source: str = "Manuale",
+                          key_prefix: str = "tg", default_top: int = 5):
+    """Pannello riutilizzabile per inviare gli alert su Telegram."""
+    if df_alert is None or df_alert.empty:
+        return
+    st.markdown("---")
+    st.markdown("#### 📨 Notifica Telegram")
+    _tk, _ch = _get_telegram_creds()
+    has_creds = bool(_tk and _ch)
+    if not has_creds:
+        st.caption("Configura il bot in **🩺 Salute Dati → Telegram bot** "
+                   "(o variabili env `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`).")
+    cols = st.columns([1, 1, 2])
+    top_n = cols[0].number_input("Top N", min_value=1, max_value=20,
+                                 value=min(default_top, len(df_alert)),
+                                 step=1, key=f"{key_prefix}_topn")
+    min_edge_tg = cols[1].slider("Edge minimo (%) per Telegram", -5, 30, 4,
+                                 key=f"{key_prefix}_min_edge")
+    cols[2].caption("I messaggi arrivano in HTML al chat configurato. Usa l'edge per "
+                    "filtrare solo le pick di qualità.")
+
+    df_send = df_alert[df_alert["Edge %"] >= min_edge_tg].head(int(top_n))
+    if df_send.empty:
+        st.info("Nessuna pick supera la soglia di edge selezionata.")
+        return
+
+    msg = _format_alerts_for_telegram(df_send, max_rows=int(top_n),
+                                      title="🚨 Value Alert NBA",
+                                      source=source)
+    with st.expander("Anteprima messaggio", expanded=False):
+        st.code(msg, language="html")
+
+    if st.button("📨 Invia su Telegram", key=f"{key_prefix}_send",
+                 disabled=not has_creds):
+        ok, info = send_telegram_message(msg)
+        if ok:
+            st.success(f"✅ Inviate {len(df_send)} pick su Telegram. {info}")
+        else:
+            st.error(f"❌ Invio fallito: {info}")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -2610,10 +2893,12 @@ def health_page():
     c2.metric("Anomalie ID", len(integ["collisions"]))
     c3.metric("Team caricati", len(teams_local))
     c4.metric("Stagione", SEASON)
-    s1, s2, s3 = st.columns(3)
+    _tg_tok, _tg_chat = _get_telegram_creds()
+    s1, s2, s3, s4 = st.columns(4)
     s1.metric("API NBA", "🟢 Configurata" if API_KEY else "🔴 Mancante")
     s2.metric("Odds API", "🟢 Configurata" if ODDS_API_KEY else "🔴 Mancante")
-    s3.metric("Versione", VERSION)
+    s3.metric("Telegram", "🟢 Attivo" if (_tg_tok and _tg_chat) else "🔴 Off")
+    s4.metric("Versione", VERSION)
 
     st.markdown("---")
     st.markdown("#### 🧪 Test endpoint API")
@@ -2693,10 +2978,57 @@ def health_page():
         st.dataframe(coll, width="stretch", hide_index=True)
 
     st.markdown("---")
+    st.markdown("#### 📨 Telegram bot")
+    st.caption(
+        "Configura il bot per ricevere notifiche delle value alert. "
+        "Crea il bot con [@BotFather](https://t.me/BotFather) → ottieni il **token**. "
+        "Apri una chat col bot, invia `/start`, poi visita "
+        "`https://api.telegram.org/bot<TOKEN>/getUpdates` per leggere il **chat_id**."
+    )
+    tk_default, ch_default = _get_telegram_creds()
+    tg_c1, tg_c2 = st.columns(2)
+    new_token = tg_c1.text_input("Bot token", value=tk_default,
+                                 type="password", key="tg_token_input")
+    new_chat  = tg_c2.text_input("Chat ID", value=ch_default,
+                                 key="tg_chat_input")
+    save_col, test_col, clear_col = st.columns([1, 1, 1])
+    if save_col.button("💾 Salva credenziali (sessione)"):
+        st.session_state["tg_token_override"] = new_token.strip()
+        st.session_state["tg_chat_override"]  = new_chat.strip()
+        st.success("Credenziali salvate per questa sessione.")
+    if test_col.button("📨 Invia messaggio test"):
+        # usa quelle scritte ora (non solo session_state) per consentire test on-the-fly
+        ok, info = send_telegram_message(
+            f"✅ <b>NBA Whale Pro</b> · test connessione\n<i>{datetime.datetime.now():%d/%m/%Y %H:%M:%S}</i>",
+            bot_token=new_token.strip(),
+            chat_id=new_chat.strip(),
+        )
+        if ok:
+            st.success(f"Messaggio test inviato. {info}")
+        else:
+            st.error(f"Invio fallito: {info}")
+    if clear_col.button("🗑️ Cancella credenziali sessione"):
+        for k in ("tg_token_override", "tg_chat_override"):
+            if k in st.session_state:
+                del st.session_state[k]
+        st.info("Credenziali rimosse dalla sessione (restano eventuali env-var).")
+
+    tk_active, ch_active = _get_telegram_creds()
+    st.caption(
+        f"Stato: {'🟢 attivo' if (tk_active and ch_active) else '🔴 non configurato'} · "
+        f"Token: {'…' + tk_active[-4:] if tk_active else 'mancante'} · "
+        f"Chat: {ch_active or 'mancante'}"
+    )
+
+    st.markdown("---")
     st.markdown("#### 📡 Stato configurazione")
+    tk_cfg, ch_cfg = _get_telegram_creds()
     cfg = pd.DataFrame([
         {"Parametro": "BASE_URL", "Valore": BASE_URL},
         {"Parametro": "ODDS_API_BASE", "Valore": ODDS_API_BASE},
+        {"Parametro": "TELEGRAM_API_BASE", "Valore": TELEGRAM_API_BASE},
+        {"Parametro": "Telegram configurato", "Valore": "🟢 sì" if (tk_cfg and ch_cfg) else "🔴 no"},
+        {"Parametro": "Bankroll file", "Valore": BANKROLL_FILE},
         {"Parametro": "REQ_TIMEOUT (s)", "Valore": REQ_TIMEOUT},
         {"Parametro": "MAX_RETRIES", "Valore": MAX_RETRIES},
         {"Parametro": "Stagione", "Valore": SEASON},
