@@ -209,7 +209,27 @@ if _ICON_192 and _ICON_512:
 """
     components.html(_PWA_BOOTSTRAP, height=0, width=0)
 
-API_KEY     = os.environ.get("API_SPORTS_KEY", "d8c21a4004e1999c362481a3abb16260")
+def _get_secret(key: str, default: str = "") -> str:
+    """Legge una credenziale con priorità:
+       1. st.secrets (Streamlit Cloud → Settings → Secrets, oppure file
+          .streamlit/secrets.toml in locale)
+       2. variabile d'ambiente
+       3. default (vuoto)
+    Nessuna chiave viene mai hard-coded nel sorgente."""
+    try:
+        if hasattr(st, "secrets") and key in st.secrets:
+            val = st.secrets[key]
+            if val is not None:
+                return str(val)
+    except Exception:
+        pass
+    return os.environ.get(key, default)
+
+
+# ── Credenziali (lette da st.secrets / env, MAI committate nel codice) ────
+API_KEY      = _get_secret("API_SPORTS_KEY", "")
+ODDS_API_KEY = _get_secret("ODDS_API_KEY", "")
+
 BASE_URL    = "https://v2.nba.api-sports.io"
 SEASON      = "2025"
 STAT_LABELS = {"PTS": "Punti", "REB": "Rimbalzi", "AST": "Assist"}
@@ -219,12 +239,11 @@ REQ_TIMEOUT = 15
 MAX_RETRIES = 3
 EPLAY24_BASE_URL = "https://www.eplay24.com"
 ODDS_API_BASE = "https://api.the-odds-api.com/v4"
-ODDS_API_KEY = os.environ.get("ODDS_API_KEY", "d0610cb7c6f61f3424a82d4d2e56c4e3")
 
 # ── Telegram bot (opzionale, per notifiche value alert) ────────────────────
 TELEGRAM_API_BASE   = "https://api.telegram.org"
-TELEGRAM_BOT_TOKEN  = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID    = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN  = _get_secret("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID    = _get_secret("TELEGRAM_CHAT_ID", "")
 
 # ── Persistenza bankroll su file (effimera su Streamlit Cloud, persistente in locale) ──
 BANKROLL_FILE = os.path.join(
@@ -1838,9 +1857,6 @@ def bankroll_page():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def single_player_page(linee: dict, n_partite: int, n_slump: int):
-    use_sidebar_player = st.session_state.get("use_sidebar_player_sync", False)
-    if use_sidebar_player and st.session_state.get("sidebar_player_pick"):
-        st.session_state["sp_input"] = st.session_state["sidebar_player_pick"]
     query = st.text_input("🔍 Cerca giocatore NBA",
                           value="Donovan Mitchell",
                           placeholder="Es: LeBron, Curry, Jokic, Giannis…",
@@ -3330,20 +3346,6 @@ with st.sidebar:
         lookup = {t["label"]: t["id"] for t in teams_opts}
         st.session_state.team_1_id = lookup.get(t1_label)
         st.session_state.team_2_id = lookup.get(t2_label)
-
-        roster_team_label = st.selectbox("Roster da squadra", labels, index=default_1, key="roster_team_label")
-        roster_team_id = lookup.get(roster_team_label)
-        team_players = fetch_team_players(roster_team_id, SEASON) if roster_team_id else []
-        if team_players:
-            player_labels = [p["label"] for p in team_players]
-            selected_label = st.selectbox("Giocatore (da roster)", player_labels, key="sidebar_player_pick_label")
-            selected_map = {p["label"]: p["name"] for p in team_players}
-            sidebar_player = selected_map.get(selected_label, "")
-            st.session_state["sidebar_player_pick"] = sidebar_player
-            st.checkbox("Usa giocatore roster in Analisi Singolo", value=False, key="use_sidebar_player_sync")
-            st.caption(f"Selezionato: {sidebar_player}")
-        else:
-            st.caption("Roster non disponibile per la squadra selezionata.")
     else:
         st.caption("Team list non disponibile (API).")
         if st.button("🔄 Riprova caricamento team"):
