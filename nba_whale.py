@@ -1,11 +1,13 @@
 import os
 import io
 import json
+import base64
 import datetime
 import difflib
 import math
 import re
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 import requests
 import plotly.graph_objects as go
@@ -50,7 +52,9 @@ _PWA_MANIFEST = (
     '{'
     '"name":"NBA Whale Pro",'
     '"short_name":"NBA Whale",'
-    '"start_url":".",'
+    '"id":"/?source=pwa",'
+    '"start_url":"/",'
+    '"scope":"/",'
     '"display":"standalone",'
     '"orientation":"portrait",'
     '"background_color":"#0E1117",'
@@ -58,6 +62,8 @@ _PWA_MANIFEST = (
     f'"icons":[{",".join(_icon_entries)}]'
     '}'
 )
+# Codifico in base64 per passarlo dentro lo script JS senza problemi di escaping
+_MANIFEST_B64 = base64.b64encode(_PWA_MANIFEST.encode("utf-8")).decode("ascii")
 
 # Favicon (sostituisce quello di default di Streamlit)
 _favicon_192 = (
@@ -98,6 +104,66 @@ _PWA_HEAD = f"""
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 """
 st.markdown(_PWA_HEAD, unsafe_allow_html=True)
+
+# ── Bootstrap PWA: sostituisce il manifest e i favicon di default di Streamlit ──
+# Streamlit inietta il SUO manifest/favicon nell'<head>; un st.markdown finisce
+# nel <body> quindi non viene preso. Usiamo un componente HTML che, dall'iframe,
+# raggiunge window.parent.document e modifica direttamente l'<head>.
+if _ICON_192 and _ICON_512:
+    _PWA_BOOTSTRAP = f"""
+<script>
+(function() {{
+    try {{
+        var doc = window.parent && window.parent.document;
+        if (!doc) return;
+        var head = doc.head;
+        if (!head) return;
+
+        ['link[rel="manifest"]',
+         'link[rel="icon"]',
+         'link[rel="shortcut icon"]',
+         'link[rel="apple-touch-icon"]',
+         'link[rel="apple-touch-icon-precomposed"]',
+         'meta[name="theme-color"]'].forEach(function(sel) {{
+            head.querySelectorAll(sel).forEach(function(el) {{
+                el.parentNode.removeChild(el);
+            }});
+        }});
+
+        var manifestJson = atob('{_MANIFEST_B64}');
+        var manifest = doc.createElement('link');
+        manifest.rel = 'manifest';
+        manifest.href = 'data:application/manifest+json;utf8,' + encodeURIComponent(manifestJson);
+        head.appendChild(manifest);
+
+        function addLink(rel, sizes, b64) {{
+            var l = doc.createElement('link');
+            l.rel = rel;
+            l.type = 'image/png';
+            if (sizes) l.setAttribute('sizes', sizes);
+            l.href = 'data:image/png;base64,' + b64;
+            head.appendChild(l);
+        }}
+
+        addLink('icon',              '192x192', '{_ICON_192}');
+        addLink('icon',              '512x512', '{_ICON_512}');
+        addLink('shortcut icon',     '',        '{_ICON_192}');
+        addLink('apple-touch-icon',  '192x192', '{_ICON_192}');
+        addLink('apple-touch-icon',  '512x512', '{_ICON_512}');
+
+        var meta = doc.createElement('meta');
+        meta.name = 'theme-color';
+        meta.content = '#00D4AA';
+        head.appendChild(meta);
+
+        doc.title = 'NBA Whale Pro';
+    }} catch (e) {{
+        console.error('NBA Whale PWA bootstrap failed', e);
+    }}
+}})();
+</script>
+"""
+    components.html(_PWA_BOOTSTRAP, height=0, width=0)
 
 API_KEY     = os.environ.get("API_SPORTS_KEY", "d8c21a4004e1999c362481a3abb16260")
 BASE_URL    = "https://v2.nba.api-sports.io"
