@@ -886,27 +886,40 @@ def show_verdict_block(prob: float, hit: float, df_r: pd.DataFrame,
         f'<span style="font-size:0.85rem;color:#8B949E">{desc}</span>'
         f'</div>', unsafe_allow_html=True)
 
-    fig = go.Figure(go.Indicator(
-        mode="gauge+number", value=score,
-        title={"text": f"Segnale {stat_lbl}", "font": {"size": 13}},
-        number={"font": {"size": 26}},
-        gauge={
-            "axis": {"range": [0, 100], "tickfont": {"size": 10}},
-            "bar":  {"color": bar_color, "thickness": 0.25},
-            "steps": [
-                {"range": [0,  32], "color": "#2d0000"},
-                {"range": [32, 43], "color": "#4a1a1a"},
-                {"range": [43, 57], "color": "#2d2d00"},
-                {"range": [57, 68], "color": "#0d3320"},
-                {"range": [68,100], "color": "#062218"},
-            ],
-            "threshold": {"line": {"color": "white", "width": 2}, "value": 57},
-        }
-    ))
-    fig.update_layout(height=220, template="plotly_dark",
-                      margin=dict(t=36, b=4, l=8, r=8))
-    st.plotly_chart(fig, width="stretch")
-    st.caption("Score = 40% Poisson + 40% Hit Rate + 20% Forma. Non è consulenza finanziaria.")
+    # Barra orizzontale leggibile al posto del semicerchio
+    pct = max(0.0, min(100.0, float(score)))
+    band_label = (
+        "BET UNDER" if pct < 32 else
+        "Under probabile" if pct < 43 else
+        "Skip / incerto" if pct < 57 else
+        "Over probabile" if pct < 68 else
+        "BET OVER"
+    )
+    st.markdown(
+        f"""
+<div style="margin:8px 0 4px 0;">
+    <div style="display:flex;justify-content:space-between;font-size:0.85rem;color:#8B949E;">
+        <span>Segnale {stat_lbl}</span>
+        <span><strong style="color:{bar_color};font-size:1.05rem;">{pct:.0f}/100</strong> · {band_label}</span>
+    </div>
+    <div style="height:14px;background:#1c2230;border-radius:7px;overflow:hidden;margin-top:4px;
+                background:linear-gradient(to right,
+                    #FF5252 0%, #FF5252 32%,
+                    #FFD600 32%, #FFD600 57%,
+                    #00D4AA 57%, #00D4AA 100%);">
+        <div style="height:100%;width:{pct}%;background:rgba(0,0,0,0.0);
+                    border-right:3px solid white;box-shadow:0 0 8px white;"></div>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:#8B949E;margin-top:2px;">
+        <span>0</span><span>32</span><span>57</span><span>100</span>
+    </div>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+    st.caption("Score 0–100 = 40% Poisson + 40% Hit Rate + 20% Forma. "
+               "Sotto 32 → Under, 32–57 → incerto, 57–68 → Over probabile, 68+ → Bet Over. "
+               "Non è consulenza finanziaria.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1089,21 +1102,97 @@ def _line_gap(avg_value: float, line: float):
     return float(avg_value - line)
 
 
+def _fmt_signed(val: float, unit: str = "") -> str:
+    sign = "+" if val > 0 else ("" if val == 0 else "")
+    return f"{sign}{val:.2f}{unit}"
+
+
+def _read_delta(val: float, stat_lbl: str) -> str:
+    if val > 1.5:
+        return f"📈 In netta crescita: ~{val:+.1f} {stat_lbl} sopra la sua media stagionale."
+    if val > 0.4:
+        return f"↗️ In leggera crescita: ~{val:+.1f} {stat_lbl} sopra la media stagionale."
+    if val < -1.5:
+        return f"📉 In netto calo: {val:+.1f} {stat_lbl} sotto la media stagionale."
+    if val < -0.4:
+        return f"↘️ In leggero calo: {val:+.1f} {stat_lbl} sotto la media stagionale."
+    return f"➡️ Stabile: in linea con la sua media stagionale ({val:+.1f})."
+
+
+def _read_consistency(val: float) -> str:
+    if val >= 80: return f"🎯 Molto costante ({val:.0f}/100): performance simili partita per partita."
+    if val >= 65: return f"✅ Buona costanza ({val:.0f}/100): poche oscillazioni."
+    if val >= 45: return f"⚖️ Costanza media ({val:.0f}/100): qualche partita storta."
+    return f"⚠️ Volatile ({val:.0f}/100): performance molto altalenanti."
+
+
+def _read_pct_top(val: float, label: str) -> str:
+    if val >= 35: return f"🚀 Spesso esplode in alto: {val:.0f}% delle partite top {label}."
+    if val >= 20: return f"📊 Top {label} circa 1 partita su 4–5 ({val:.0f}%)."
+    return f"😐 Raramente in modalità top {label} ({val:.0f}%)."
+
+
+def _read_pct_bottom(val: float) -> str:
+    if val >= 35: return f"🆘 Spesso fa flop: {val:.0f}% delle partite molto sotto la media."
+    if val >= 20: return f"⚠️ Flop circa 1 su 4–5 partite ({val:.0f}%)."
+    return f"💪 Raramente sotto soglia ({val:.0f}%)."
+
+
+def _read_momentum(val: float) -> str:
+    if val >= 65: return f"🔥 Forma in salita ({val:.0f}/100): ultime 3 nettamente meglio."
+    if val >= 53: return f"⬆️ Forma in lieve crescita ({val:.0f}/100)."
+    if val <= 35: return f"❄️ Forma in calo ({val:.0f}/100): ultime 3 sotto la media recente."
+    if val <= 47: return f"⬇️ Forma in lieve discesa ({val:.0f}/100)."
+    return f"➡️ Forma stabile ({val:.0f}/100)."
+
+
+def _read_pressure(val: float) -> str:
+    if val >= 75: return f"🧘 Bassa pressione ({val:.0f}/100): poche perse, gestisce bene il pallone."
+    if val >= 55: return f"🙂 Pressione media ({val:.0f}/100)."
+    return f"😰 Sotto pressione ({val:.0f}/100): troppe perse, errori sotto stress."
+
+
+def _read_two_way(val: float) -> str:
+    if val >= 25: return f"💎 Impatto difensivo elevato ({val:.1f}): tante stoppate/recuperi."
+    if val >= 10: return f"✅ Buon impatto difensivo ({val:.1f})."
+    if val >= 0:  return f"➖ Impatto difensivo modesto ({val:.1f})."
+    return f"❌ Negativo ({val:.1f}): perse > stoppate+recuperi."
+
+
+def _read_gap(val: float, stat_lbl: str) -> str:
+    if val >= 3:   return f"💚 Media molto sopra la linea ({val:+.1f} {stat_lbl}): segnale forte Over."
+    if val >= 1:   return f"🟢 Media sopra la linea ({val:+.1f} {stat_lbl}): leggermente Over."
+    if val >= -1:  return f"🟡 Media vicinissima alla linea ({val:+.1f} {stat_lbl}): incerto."
+    if val >= -3:  return f"🟠 Media sotto la linea ({val:+.1f} {stat_lbl}): leggermente Under."
+    return f"🔴 Media molto sotto la linea ({val:+.1f} {stat_lbl}): segnale forte Under."
+
+
 def build_extra_10_tools(df_r: pd.DataFrame, df_all: pd.DataFrame, linee: dict):
-    avg_pts = float(df_r["PTS"].mean()) if "PTS" in df_r.columns and not df_r.empty else 0.0
-    extra = [
-        ("E1", "Delta recente-stagionale PTS", _recent_vs_season_delta(df_r, df_all, "PTS")),
-        ("E2", "Delta recente-stagionale REB", _recent_vs_season_delta(df_r, df_all, "REB")),
-        ("E3", "Delta recente-stagionale AST", _recent_vs_season_delta(df_r, df_all, "AST")),
-        ("E4", "Consistency Index PTS", _consistency_index(df_r, "PTS")),
-        ("E5", "Ceiling Rate PTS %", _ceiling_rate(df_r, "PTS")),
-        ("E6", "Floor Rate PTS %", _floor_rate(df_r, "PTS")),
-        ("E7", "Momentum Index PTS", _momentum_index(df_r, "PTS")),
-        ("E8", "Pressure Index (da TOV)", _pressure_index(df_r)),
-        ("E9", "Two-Way Impact (STL+BLK-TOV)", _two_way_impact(df_r)),
-        ("E10", "Line Gap PTS (media-linea)", _line_gap(avg_pts, linee.get("PTS", 0))),
+    avg_pts  = float(df_r["PTS"].mean()) if "PTS" in df_r.columns and not df_r.empty else 0.0
+    d_pts    = _recent_vs_season_delta(df_r, df_all, "PTS")
+    d_reb    = _recent_vs_season_delta(df_r, df_all, "REB")
+    d_ast    = _recent_vs_season_delta(df_r, df_all, "AST")
+    cons_pts = _consistency_index(df_r, "PTS")
+    ceil_pts = _ceiling_rate(df_r, "PTS")
+    floor_pts = _floor_rate(df_r, "PTS")
+    mom_pts  = _momentum_index(df_r, "PTS")
+    press    = _pressure_index(df_r)
+    two_way  = _two_way_impact(df_r)
+    gap_pts  = _line_gap(avg_pts, linee.get("PTS", 0))
+
+    rows = [
+        ("E1",  "Trend PUNTI (recente vs stagione)",     _fmt_signed(d_pts, " PTS"),  _read_delta(d_pts, "PTS")),
+        ("E2",  "Trend RIMBALZI (recente vs stagione)",  _fmt_signed(d_reb, " REB"),  _read_delta(d_reb, "REB")),
+        ("E3",  "Trend ASSIST (recente vs stagione)",    _fmt_signed(d_ast, " AST"),  _read_delta(d_ast, "AST")),
+        ("E4",  "Costanza nei PUNTI",                    f"{cons_pts:.0f}/100",       _read_consistency(cons_pts)),
+        ("E5",  "Frequenza serata TOP nei PUNTI",        f"{ceil_pts:.0f}%",          _read_pct_top(ceil_pts, "PTS")),
+        ("E6",  "Frequenza serata FLOP nei PUNTI",       f"{floor_pts:.0f}%",         _read_pct_bottom(floor_pts)),
+        ("E7",  "Momentum (ultime 3 vs ultime 10) PTS",  f"{mom_pts:.0f}/100",        _read_momentum(mom_pts)),
+        ("E8",  "Gestione palla / pressione",            f"{press:.0f}/100",          _read_pressure(press)),
+        ("E9",  "Impatto difensivo (STL+BLK − TOV)",     f"{two_way:.1f}",            _read_two_way(two_way)),
+        ("E10", "Gap PUNTI vs linea Over/Under",         _fmt_signed(gap_pts, " PTS"), _read_gap(gap_pts, "PTS")),
     ]
-    return pd.DataFrame(extra, columns=["#", "Tool", "Valore"])
+    return pd.DataFrame(rows, columns=["#", "Indicatore", "Valore", "Cosa significa"])
 
 
 def build_40_tools(name: str, df_all: pd.DataFrame, df_r: pd.DataFrame, linee: dict):
@@ -1926,28 +2015,55 @@ def single_player_page(linee: dict, n_partite: int, n_slump: int):
     show_contropronostici(resolved_name, df_all, min(n_slump, len(df_all)))
     st.markdown("---")
 
-    st.subheader("📈 Andamento Prestazioni")
+    st.subheader("📊 Andamento Prestazioni")
+    st.caption("Barre verdi = partita SOPRA la linea (Over). Barre rosse = SOTTO (Under). "
+               "Linea tratteggiata rossa = la tua linea, linea gialla = la media del periodo.")
     tg1, tg2, tg3 = st.tabs(["Punti", "Rimbalzi", "Assist"])
-    for tab, col, linea, color in [
-        (tg1, "PTS", linee["PTS"], "#00D4AA"),
-        (tg2, "REB", linee["REB"], "#3B9EFF"),
-        (tg3, "AST", linee["AST"], "#FF9F40"),
+    for tab, col, linea in [
+        (tg1, "PTS", linee["PTS"]),
+        (tg2, "REB", linee["REB"]),
+        (tg3, "AST", linee["AST"]),
     ]:
         with tab:
-            if col in df_r.columns:
+            if col in df_r.columns and not df_r.empty:
                 avg_v = df_r[col].mean()
+                # ordino dal più vecchio al più recente per leggere "da sinistra a destra"
+                df_chart = df_r.sort_values("GAME_DATE")
+                values = df_chart[col].astype(float)
+                colors = ["#00D4AA" if v > linea else "#FF5252" for v in values]
+                hits   = int((values > linea).sum())
+                total  = len(values)
+                # etichette x compatte (es. "12 Mar")
+                try:
+                    x_labels = pd.to_datetime(df_chart["GAME_DATE"]).dt.strftime("%d %b")
+                except Exception:
+                    x_labels = df_chart["GAME_DATE"].astype(str)
+
+                k1, k2, k3 = st.columns(3)
+                k1.metric("Sopra la linea", f"{hits}/{total}",
+                          delta=f"{(hits/total*100):.0f}%" if total else "—")
+                k2.metric("Media periodo", f"{avg_v:.1f}")
+                k3.metric("La tua linea", f"{linea}")
+
                 fig = go.Figure()
-                fig.add_trace(go.Scatter(x=df_r["GAME_DATE"], y=df_r[col],
-                                         mode="lines+markers",
-                                         line=dict(color=color, width=2.5),
-                                         marker=dict(size=7),
-                                         name=STAT_LABELS[col]))
+                fig.add_trace(go.Bar(
+                    x=x_labels, y=values,
+                    marker_color=colors,
+                    text=[f"{v:.0f}" for v in values],
+                    textposition="outside",
+                    name=STAT_LABELS[col],
+                    hovertemplate="<b>%{x}</b><br>" + STAT_LABELS[col] + ": %{y}<extra></extra>",
+                ))
                 fig.add_hline(y=linea, line_dash="dash", line_color="#FF5252",
-                              annotation_text=f"Linea {linea}")
-                fig.add_hline(y=avg_v,  line_dash="dot",  line_color="#FFD600",
-                              annotation_text=f"Media {avg_v:.1f}")
-                fig.update_layout(height=360, template="plotly_dark",
-                                  xaxis_title="Data", yaxis_title=STAT_LABELS[col])
+                              annotation_text=f"Linea {linea}",
+                              annotation_position="top right")
+                fig.add_hline(y=avg_v, line_dash="dot", line_color="#FFD600",
+                              annotation_text=f"Media {avg_v:.1f}",
+                              annotation_position="bottom right")
+                fig.update_layout(height=380, template="plotly_dark",
+                                  xaxis_title="", yaxis_title=STAT_LABELS[col],
+                                  bargap=0.25, showlegend=False,
+                                  margin=dict(t=40, b=40, l=40, r=20))
                 st.plotly_chart(fig, width="stretch")
     st.markdown("---")
 
@@ -1987,7 +2103,9 @@ def single_player_page(linee: dict, n_partite: int, n_slump: int):
                            file_name=f"{resolved_name.replace(' ','_')}_analisi.csv",
                            mime="text/csv")
     st.markdown("---")
-    st.subheader("🧠 Extra 10 Tool")
+    st.subheader("🧠 10 Indicatori chiave del giocatore")
+    st.caption("Valori di sintesi con interpretazione in italiano. "
+               "Se l'indicatore è 'in crescita' o 'sopra la linea' → segnale a favore dell'Over.")
     extra_df = build_extra_10_tools(df_r, df_all, linee)
     st.dataframe(extra_df, width="stretch", hide_index=True)
 
