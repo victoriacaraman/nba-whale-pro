@@ -1,0 +1,7 @@
+*.lnk
+desktop.ini
+__pycache__/
+NBA_Ultra_App/
+Universit*/
+nba_bet.py
+.streamlit/icons_b64.txt
