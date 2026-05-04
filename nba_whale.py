@@ -105,61 +105,105 @@ _PWA_HEAD = f"""
 """
 st.markdown(_PWA_HEAD, unsafe_allow_html=True)
 
-# ── Bootstrap PWA: sostituisce il manifest e i favicon di default di Streamlit ──
-# Streamlit inietta il SUO manifest/favicon nell'<head>; un st.markdown finisce
-# nel <body> quindi non viene preso. Usiamo un componente HTML che, dall'iframe,
-# raggiunge window.parent.document e modifica direttamente l'<head>.
+# ── Bootstrap PWA: sostituisce manifest+favicon di Streamlit (e li tiene fissi) ──
+# Streamlit re-inietta i propri tag nell'<head> ad ogni render React, quindi non
+# basta sostituirli una volta: usiamo un MutationObserver che li rimette a posto
+# ogni volta che Streamlit cerca di rimetterceli. Lo script gira in un iframe
+# components.html ma raggiunge window.parent.document.
 if _ICON_192 and _ICON_512:
     _PWA_BOOTSTRAP = f"""
 <script>
 (function() {{
+    var MANIFEST_B64 = '{_MANIFEST_B64}';
+    var ICON_192     = '{_ICON_192}';
+    var ICON_512     = '{_ICON_512}';
+    var TARGET_TITLE = 'NBA Whale Pro';
+
+    function applyOnce() {{
+        try {{
+            var doc = window.parent && window.parent.document;
+            if (!doc) return false;
+            var head = doc.head;
+            if (!head) return false;
+
+            // 1) Rimuovi qualunque manifest/favicon/theme-color esistente
+            ['link[rel="manifest"]',
+             'link[rel="icon"]',
+             'link[rel="shortcut icon"]',
+             'link[rel="apple-touch-icon"]',
+             'link[rel="apple-touch-icon-precomposed"]',
+             'meta[name="theme-color"]'].forEach(function(sel) {{
+                head.querySelectorAll(sel).forEach(function(el) {{
+                    if (!el.dataset.nbaWhale) {{ el.parentNode.removeChild(el); }}
+                }});
+            }});
+
+            // Se i miei tag sono già presenti non duplico
+            if (head.querySelector('link[rel="manifest"][data-nba-whale]')) {{
+                if (doc.title !== TARGET_TITLE) doc.title = TARGET_TITLE;
+                return true;
+            }}
+
+            // 2) Aggiungi il mio manifest
+            var manifestJson = atob(MANIFEST_B64);
+            var manifest = doc.createElement('link');
+            manifest.rel = 'manifest';
+            manifest.dataset.nbaWhale = '1';
+            manifest.href = 'data:application/manifest+json;utf8,' + encodeURIComponent(manifestJson);
+            head.appendChild(manifest);
+
+            // 3) Aggiungi favicon e apple-touch-icon
+            function addLink(rel, sizes, b64) {{
+                var l = doc.createElement('link');
+                l.rel = rel;
+                l.type = 'image/png';
+                l.dataset.nbaWhale = '1';
+                if (sizes) l.setAttribute('sizes', sizes);
+                l.href = 'data:image/png;base64,' + b64;
+                head.appendChild(l);
+            }}
+            addLink('icon',              '192x192', ICON_192);
+            addLink('icon',              '512x512', ICON_512);
+            addLink('shortcut icon',     '',        ICON_192);
+            addLink('apple-touch-icon',  '192x192', ICON_192);
+            addLink('apple-touch-icon',  '512x512', ICON_512);
+
+            // 4) theme-color
+            var meta = doc.createElement('meta');
+            meta.name = 'theme-color';
+            meta.content = '#00D4AA';
+            meta.dataset.nbaWhale = '1';
+            head.appendChild(meta);
+
+            // 5) Titolo
+            doc.title = TARGET_TITLE;
+
+            console.log('[NBA Whale] PWA manifest e favicon installati.');
+            return true;
+        }} catch (e) {{
+            console.error('[NBA Whale] PWA bootstrap failed:', e);
+            return false;
+        }}
+    }}
+
+    // Esegui subito + dopo qualche tick (Streamlit potrebbe non aver ancora montato l'<head>)
+    applyOnce();
+    [50, 200, 500, 1000, 2000, 4000].forEach(function(ms) {{
+        setTimeout(applyOnce, ms);
+    }});
+
+    // Tieni l'<head> sotto controllo: se Streamlit cancella i nostri tag, li rimettiamo
     try {{
         var doc = window.parent && window.parent.document;
-        if (!doc) return;
-        var head = doc.head;
-        if (!head) return;
-
-        ['link[rel="manifest"]',
-         'link[rel="icon"]',
-         'link[rel="shortcut icon"]',
-         'link[rel="apple-touch-icon"]',
-         'link[rel="apple-touch-icon-precomposed"]',
-         'meta[name="theme-color"]'].forEach(function(sel) {{
-            head.querySelectorAll(sel).forEach(function(el) {{
-                el.parentNode.removeChild(el);
-            }});
-        }});
-
-        var manifestJson = atob('{_MANIFEST_B64}');
-        var manifest = doc.createElement('link');
-        manifest.rel = 'manifest';
-        manifest.href = 'data:application/manifest+json;utf8,' + encodeURIComponent(manifestJson);
-        head.appendChild(manifest);
-
-        function addLink(rel, sizes, b64) {{
-            var l = doc.createElement('link');
-            l.rel = rel;
-            l.type = 'image/png';
-            if (sizes) l.setAttribute('sizes', sizes);
-            l.href = 'data:image/png;base64,' + b64;
-            head.appendChild(l);
+        if (doc && doc.head && window.MutationObserver) {{
+            var obs = new MutationObserver(function() {{ applyOnce(); }});
+            obs.observe(doc.head, {{ childList: true, subtree: true }});
+            // Anche sul title perché Streamlit lo cambia ad ogni rerun
+            if (doc.querySelector('title')) {{
+                obs.observe(doc.querySelector('title'), {{ childList: true, characterData: true }});
+            }}
         }}
-
-        addLink('icon',              '192x192', '{_ICON_192}');
-        addLink('icon',              '512x512', '{_ICON_512}');
-        addLink('shortcut icon',     '',        '{_ICON_192}');
-        addLink('apple-touch-icon',  '192x192', '{_ICON_192}');
-        addLink('apple-touch-icon',  '512x512', '{_ICON_512}');
-
-        var meta = doc.createElement('meta');
-        meta.name = 'theme-color';
-        meta.content = '#00D4AA';
-        head.appendChild(meta);
-
-        doc.title = 'NBA Whale Pro';
-    }} catch (e) {{
-        console.error('NBA Whale PWA bootstrap failed', e);
-    }}
+    }} catch (e) {{ /* ignore */ }}
 }})();
 </script>
 """
