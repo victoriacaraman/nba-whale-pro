@@ -3,6 +3,7 @@ import io
 import json
 import base64
 import datetime
+from zoneinfo import ZoneInfo
 import difflib
 import math
 import re
@@ -822,13 +823,8 @@ def _format_player_bio_caption(bio: dict | None) -> str:
 
 
 def _game_status_short(game_obj: dict) -> int | None:
-    """`status.short` da API NBA: 1=Not Started · 2=Live · 3=Finished · 4+
-    Vedi docs api-sports.io."""
-    try:
-        st = (game_obj.get("status") or {}).get("short")
-        return int(st) if st is not None and st != "" else None
-    except (TypeError, ValueError):
-        return None
+    """Compat: codice intero `status.short` — delega a `_status_code_short`."""
+    return _status_code_short(game_obj)
 
 
 def _side_score_total(side_scores: dict) -> float:
@@ -867,6 +863,144 @@ def _api_get(path: str, params: dict):
             if attempt < MAX_RETRIES:
                 continue
     raise last_err
+
+
+def _status_code_short(game_obj: dict) -> int | None:
+    """Codice stato API-NBA v2: 1=NS, 2=live, 3=finished, 4=post, 5=delay, 6=cancel."""
+    status_obj = game_obj.get("status", {}) or {}
+    sl = status_obj.get("short")
+    if sl is None or sl == "":
+        return None
+    try:
+        return int(sl)
+    except (TypeError, ValueError):
+        return None
+
+
+def _try_fetch_team_live_game(team_id: int, season: str) -> dict | None:
+    """Partite in corso ora (endpoint `live=all`)."""
+    if not team_id:
+        return None
+    try:
+        r = _api_get("/games", {"live": "all", "season": str(season), "league": "standard"})
+        games = r.json().get("response", []) or []
+    except Exception:
+        return None
+    tid = int(team_id)
+    for g in games:
+        h = (g.get("teams") or {}).get("home", {}).get("id")
+        v = (g.get("teams") or {}).get("visitors", {}).get("id")
+        if int(h or 0) == tid or int(v or 0) == tid:
+            return g
+    return None
+
+
+def _fetch_game_by_id_live(game_id: int) -> dict | None:
+    """Snapshot aggiornato di una partita (per refresh live)."""
+    if not game_id:
+        return None
+    try:
+        r = _api_get("/games", {"id": int(game_id)})
+        resp = r.json().get("response", []) or []
+        return resp[0] if resp else None
+    except Exception:
+        return None
+
+
+def _linescore_to_dataframe(game_obj: dict) -> pd.DataFrame:
+    """Righe per squadra: punti per quarto + totale."""
+    teams = game_obj.get("teams", {}) or {}
+    scores = game_obj.get("scores") or {}
+    vis = scores.get("visitors") or {}
+    home = scores.get("home") or {}
+    vch = (teams.get("visitors") or {}).get("code") or "VIS"
+    hch = (teams.get("home") or {}).get("code") or "CAS"
+
+    def _row(side: dict, code: str) -> dict:
+        ls = side.get("linescore")
+        if not isinstance(ls, (list, tuple)):
+            ls = []
+        pts = int(_side_score_total(side))
+        out: dict = {"Squadra": code, "Tot": pts}
+        for i, val in enumerate(ls):
+            lab = f"Q{i + 1}" if i < 4 else f"OT{i - 3}"
+            out[lab] = str(val)
+        return out
+
+    return pd.DataFrame([_row(vis, vch), _row(home, hch)])
+
+
+def _render_live_scoreboard_ui(game_obj: dict, my_team_id: int | None = None):
+    """Pannello: punteggio, periodo, clock, quarti."""
+    if not game_obj:
+        return
+    teams = game_obj.get("teams", {}) or {}
+    scores = game_obj.get("scores") or {}
+    vis = scores.get("visitors") or {}
+    home = scores.get("home") or {}
+    pv = int(_side_score_total(vis))
+    ph = int(_side_score_total(home))
+    vch = (teams.get("visitors") or {}).get("code") or "?"
+    hch = (teams.get("home") or {}).get("code") or "?"
+    st_obj = game_obj.get("status", {}) or {}
+    long_s = st_obj.get("long", "") or ""
+    clock = st_obj.get("clock")
+    ht = st_obj.get("halftime")
+    per = (game_obj.get("periods") or {}).get("current")
+
+    hi = int((teams.get("home", {}) or {}).get("id") or 0)
+    vi = int((teams.get("visitors", {}) or {}).get("id") or 0)
+    emph_h = my_team_id and hi == int(my_team_id)
+    emph_v = my_team_id and vi == int(my_team_id)
+
+    m1, m2 = st.columns(2)
+    m1.metric(f"✈️ {vch}", f"{pv}")
+    m2.metric(f"🏠 {hch}", f"{ph}")
+    if my_team_id and (emph_v or emph_h):
+        st.caption(
+            f"👈 **Squadra del giocatore:** {'trasferta' if emph_v else 'casa'}"
+        )
+    meta_parts = [long_s] if long_s else []
+    if per is not None:
+        meta_parts.append(f"Periodo {per}")
+    if clock not in (None, "", "0"):
+        meta_parts.append(str(clock))
+    if ht:
+        meta_parts.append("Intervallo")
+    st.caption(" · ".join(meta_parts) if meta_parts else "—")
+
+    try:
+        df_ls = _linescore_to_dataframe(game_obj)
+        st.dataframe(df_ls, width="stretch", hide_index=True)
+    except Exception:
+        st.caption("Linescore non disponibile.")
+
+    st.caption(
+        "Aggiornamento automatico ogni ~12 s. "
+        "**Play-by-play** (ogni canasta) non è fornito da api-sports: usiamo **punteggio totale e punti per quarto**."
+    )
+
+
+@st.fragment(run_every=datetime.timedelta(seconds=12))
+def _live_match_auto_refresh(game_id: int, my_team_id: int | None):
+    """Fragment: polling leggero sullo stesso game_id."""
+    g = _fetch_game_by_id_live(game_id)
+    if g:
+        _render_live_scoreboard_ui(g, my_team_id)
+    else:
+        st.caption("Connessione API…")
+
+
+def _matchup_day_badge(start_iso: str, is_live_game: bool, days_from_now: int | None) -> str:
+    if is_live_game:
+        return "🔴 LIVE · IN CORSO"
+    if days_from_now == 0:
+        return "🔴 OGGI"
+    if days_from_now == 1:
+        return "🟡 DOMANI"
+    if days_from_now is not None and days_from_now > 1:
+        return f"⏳ Tra {days_from_now} giorni"
+    return ""
 
 
 def _normalize_phase_label(raw_value) -> str:
@@ -1107,39 +1241,48 @@ def _player_team_id_from_df(df_all: pd.DataFrame):
         return None
 
 
-@st.cache_data(ttl=600)
+@st.cache_data(ttl=25)
 def find_next_game_for_team(team_id: int, season: str):
-    """Ritorna il prossimo game non finito per un team, o None."""
+    """Partita in corso (priorità) o prossima programmata. API usa codici 1=NS,2=live,3=fin."""
     if not team_id:
         return None
+    live_hit = _try_fetch_team_live_game(int(team_id), season)
+    if live_hit:
+        return live_hit
     try:
         r = _api_get("/games", {"team": int(team_id), "season": season})
         games = r.json().get("response", []) or []
     except Exception:
         return None
 
-    today = datetime.date.today()
-    upcoming = []
+    rome = ZoneInfo("Europe/Rome")
+    today_rome = datetime.datetime.now(rome).date()
+    scheduled: list[tuple[str, dict]] = []
+
     for g in games:
-        is_finished, _, is_live = _game_status_flags(g)
-        if is_finished:
+        sn = _status_code_short(g)
+        if sn == 3:
             continue
-        date_str = ((g.get("date") or {}).get("start", "") or "")[:10]
-        if not date_str:
+        if sn in (4, 6):
             continue
-        try:
-            d = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
-        except Exception:
-            continue
-        # Includiamo anche le partite "live" e quelle di oggi
-        if d < today:
-            continue
-        upcoming.append((d, is_live, g))
-    if not upcoming:
+        start_iso = (g.get("date") or {}).get("start", "") or ""
+        if sn == 2:
+            return g
+        if sn in (1, 2, 5) or sn is None:
+            try:
+                dtu = datetime.datetime.fromisoformat(
+                    start_iso.replace("Z", "+00:00")
+                )
+                d_rome = dtu.astimezone(rome).date()
+            except Exception:
+                continue
+            if d_rome >= today_rome:
+                scheduled.append((start_iso, g))
+
+    if not scheduled:
         return None
-    # Ordina: prima i live (oggi), poi per data crescente
-    upcoming.sort(key=lambda x: (not x[1], x[0]))
-    return upcoming[0][2]
+    scheduled.sort(key=lambda x: x[0])
+    return scheduled[0][1]
 
 
 def _opponent_info_from_game(game: dict, my_team_id: int) -> dict:
@@ -1172,17 +1315,21 @@ def _opponent_info_from_game(game: dict, my_team_id: int) -> dict:
 
 
 def _format_next_game_when(start_iso: str) -> tuple:
-    """Da ISO datetime → (data_str, giorni_da_oggi)."""
+    """Da ISO datetime → (data_str, giorni_da_oggi) con fuso **Europe/Rome** (CET/CEST corretti)."""
     if not start_iso:
         return "Data sconosciuta", None
     try:
-        # api-sports ritorna in UTC. Per l'utente è ok mostrare la data, l'orario Roma è +1/+2.
         dt = datetime.datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
-        # Convertiamo in fuso italiano (CET/CEST) approssimando con +1 ore (è una stima, basta per la giornata)
-        dt_local = dt + datetime.timedelta(hours=2)  # estate; durante l'inverno sarebbe +1
-        days_from_now = (dt_local.date() - datetime.date.today()).days
-        weekday_it = ["Lun","Mar","Mer","Gio","Ven","Sab","Dom"][dt_local.weekday()]
-        date_str = f"{weekday_it} {dt_local.strftime('%d/%m/%Y')} alle {dt_local.strftime('%H:%M')} (ora ITA)"
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        dt_local = dt.astimezone(ZoneInfo("Europe/Rome"))
+        today_rome = datetime.datetime.now(ZoneInfo("Europe/Rome")).date()
+        days_from_now = (dt_local.date() - today_rome).days
+        weekday_it = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"][dt_local.weekday()]
+        date_str = (
+            f"{weekday_it} {dt_local.strftime('%d/%m/%Y')} "
+            f"alle {dt_local.strftime('%H:%M')} (ora Italia)"
+        )
         return date_str, days_from_now
     except Exception:
         return start_iso, None
@@ -1457,6 +1604,8 @@ def compute_toolkit_multifactor_projection(
         "total_boost": total_boost,
         "min_scale": min_scale,
         "trend_pts_short": t_pts,
+        "game_id": int(next_game.get("id") or 0),
+        "is_live": _status_code_short(next_game) == 2,
     }
 
 
@@ -2319,11 +2468,14 @@ def toolkit_pro_page(linee: dict, n_partite: int):
         days_from_now = mf["days_from_now"]
         sede_lbl = "🏠 in casa" if opp.get("location") == "Home" else (
             "✈️ in trasferta" if opp.get("location") == "Away" else "")
-        days_lbl = (
-            "🔴 OGGI" if days_from_now == 0
-            else "🟡 DOMANI" if days_from_now == 1
-            else f"⏳ Tra {days_from_now} giorni" if days_from_now is not None and days_from_now > 0
-            else ""
+        days_lbl = _matchup_day_badge(
+            opp.get("start_iso") or "",
+            bool(mf.get("is_live")),
+            days_from_now,
+        )
+        hdr_mf = (
+            "🔴 PARTITA LIVE · MODELLO MULTIFATTORIALE" if mf.get("is_live")
+            else "PROSSIMA PARTITA · MODELLO MULTIFATTORIALE"
         )
         st.markdown(
             f"""
@@ -2331,7 +2483,7 @@ def toolkit_pro_page(linee: dict, n_partite: int):
             border:1px solid #3B9EFF;border-radius:12px;padding:18px 20px;margin-bottom:14px;">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
         <div>
-            <span style="color:#8B949E;font-size:0.8rem;letter-spacing:1px;">PROSSIMA PARTITA · MODELLO MULTIFATTORIALE</span><br>
+            <span style="color:#8B949E;font-size:0.8rem;letter-spacing:1px;">{hdr_mf}</span><br>
             <strong style="color:#3B9EFF;font-size:1.25rem;">vs {opp.get('opponent_name', '?')} ({opp.get('opponent_code', '?')})</strong>
             <span style="color:#E6EDF3;font-size:1rem;margin-left:8px;">{sede_lbl}</span>
         </div>
@@ -2344,6 +2496,9 @@ def toolkit_pro_page(linee: dict, n_partite: int):
 """,
             unsafe_allow_html=True,
         )
+
+        if mf.get("is_live") and mf.get("game_id"):
+            _live_match_auto_refresh(int(mf["game_id"]), int(mf.get("team_id") or 0) or None)
 
         pst = mf.get("player_injury_status") or "OK"
         if pst == "OUT":
@@ -3732,6 +3887,7 @@ def single_player_page(linee: dict, n_partite: int, n_slump: int):
     if next_game:
         opp = _opponent_info_from_game(next_game, my_team_id)
         date_str, days_from_now = _format_next_game_when(opp["start_iso"])
+        is_live_game = _status_code_short(next_game) == 2
 
         # Auto-fetch injuries (no manual input!)
         with st.spinner("Caricamento report infortuni..."):
@@ -3742,19 +3898,15 @@ def single_player_page(linee: dict, n_partite: int, n_slump: int):
 
         # Header box
         sede_emoji  = "🏠 in casa" if opp["location"] == "Home" else ("✈️ in trasferta" if opp["location"] == "Away" else "")
-        days_lbl = (
-            "🔴 OGGI" if days_from_now == 0
-            else "🟡 DOMANI" if days_from_now == 1
-            else f"⏳ Tra {days_from_now} giorni" if days_from_now and days_from_now > 0
-            else ""
-        )
+        days_lbl = _matchup_day_badge(opp.get("start_iso") or "", is_live_game, days_from_now)
+        hdr_lbl = "🔴 PARTITA LIVE" if is_live_game else "🗓️ PROSSIMA PARTITA"
         st.markdown(
             f"""
 <div style="background:linear-gradient(135deg,#161B22 0%,#1c2735 100%);
             border:1px solid #00D4AA;border-radius:12px;padding:18px 20px;margin-bottom:14px;">
     <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
         <div>
-            <span style="color:#8B949E;font-size:0.8rem;letter-spacing:1px;">🗓️ PROSSIMA PARTITA</span><br>
+            <span style="color:#8B949E;font-size:0.8rem;letter-spacing:1px;">{hdr_lbl}</span><br>
             <strong style="color:#00D4AA;font-size:1.4rem;">vs {opp['opponent_name']} ({opp['opponent_code']})</strong>
             <span style="color:#E6EDF3;font-size:1rem;margin-left:8px;">{sede_emoji}</span>
         </div>
@@ -3767,6 +3919,9 @@ def single_player_page(linee: dict, n_partite: int, n_slump: int):
 """,
             unsafe_allow_html=True,
         )
+
+        if is_live_game and next_game.get("id"):
+            _live_match_auto_refresh(int(next_game["id"]), int(my_team_id) if my_team_id else None)
 
         # Statistiche attese vs questo opponent (se ha già giocato in passato)
         df_vs_opp = pd.DataFrame()
@@ -4617,6 +4772,14 @@ def fetch_games_window(hours_ahead: int):
 
 
 def _game_status_flags(game_obj: dict):
+    """(finished, not_started, live). API v2 usa 1=NS, 2=live, 3=fin, 4=post, 5=delay, 6=canc."""
+    sn = _status_code_short(game_obj)
+    if sn is not None:
+        is_finished = sn == 3
+        is_live = sn == 2
+        is_not_started = sn == 1
+        return is_finished, is_not_started, is_live
+
     status_obj = game_obj.get("status", {}) or {}
     status = str(status_obj.get("long", "") or "").lower()
     short = str(status_obj.get("short", "") or "").lower()
