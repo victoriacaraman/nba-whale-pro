@@ -4802,13 +4802,8 @@ def value_alerts_page(linee: dict, n_partite: int):
 
     if mode.startswith("🔌"):
         st.markdown("#### Connessione The Odds API")
-        st.caption("Free tier 500 req/mese. Registrati su https://the-odds-api.com per ottenere la chiave.")
-        odds_key = st.text_input(
-            "API key (oppure imposta env ODDS_API_KEY)",
-            value=ODDS_API_KEY,
-            type="password",
-            key="oddsapi_key_input",
-        )
+        st.caption("Free tier 500 req/mese. Chiave letta da configurazione sicura (secrets/env).")
+        odds_key = ODDS_API_KEY
         f1, f2, f3 = st.columns(3)
         min_edge_a = f1.slider("Edge minimo (%)", -5, 20, 4, key="alert_min_edge_auto")
         min_hit_a = f2.slider("Hit rate minimo (%)", 30, 90, 50, key="alert_min_hit_auto")
