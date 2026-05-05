@@ -2581,6 +2581,146 @@ def bankroll_page():
     else:
         st.caption("Nessun bookmaker compilato nelle scommesse chiuse.")
 
+    st.markdown("#### 🧠 Analyzer")
+    if chiuse.empty:
+        st.caption("Analyzer disponibile quando hai almeno 1 scommessa chiusa nel filtro attuale.")
+    else:
+        an1, an2 = st.columns(2)
+
+        with an1:
+            st.markdown("**Profit per fascia quota**")
+            odds_bins = pd.cut(
+                chiuse["Quota"].astype(float),
+                bins=[1.0, 1.5, 1.8, 2.1, 2.5, 3.5, 10.0],
+                labels=["1.01-1.50", "1.51-1.80", "1.81-2.10", "2.11-2.50", "2.51-3.50", "3.51+"],
+                include_lowest=True,
+            )
+            by_odds = chiuse.assign(OddsBand=odds_bins).groupby("OddsBand", dropna=False).agg(
+                Bets=("OddsBand", "count"),
+                Profit=("P&L €", "sum"),
+                Stake=("Stake €", "sum"),
+            ).reset_index()
+            by_odds["ROI %"] = by_odds.apply(
+                lambda r: (r["Profit"] / r["Stake"] * 100) if r["Stake"] else 0.0,
+                axis=1,
+            )
+            fig_odds = go.Figure(go.Bar(
+                x=by_odds["OddsBand"].astype(str),
+                y=by_odds["Profit"],
+                text=[f"€{v:.1f}" for v in by_odds["Profit"]],
+                textposition="outside",
+                marker_color=["#00D4AA" if v >= 0 else "#FF5252" for v in by_odds["Profit"]],
+            ))
+            fig_odds.update_layout(
+                height=300, template="plotly_dark",
+                xaxis_title="Fascia quota", yaxis_title="Profit €",
+                margin=dict(t=20, b=20, l=20, r=20),
+            )
+            st.plotly_chart(fig_odds, width="stretch")
+
+        with an2:
+            st.markdown("**Profit per fascia stake**")
+            stake_vals = chiuse["Stake €"].astype(float)
+            q1 = float(stake_vals.quantile(0.25))
+            q2 = float(stake_vals.quantile(0.50))
+            q3 = float(stake_vals.quantile(0.75))
+            uniq_edges = sorted(set([0.0, q1, q2, q3, float(stake_vals.max()) + 0.01]))
+            if len(uniq_edges) >= 4:
+                stake_bins = pd.cut(
+                    stake_vals,
+                    bins=uniq_edges,
+                    include_lowest=True,
+                    duplicates="drop",
+                )
+                by_stake = chiuse.assign(StakeBand=stake_bins).groupby("StakeBand", dropna=False).agg(
+                    Bets=("StakeBand", "count"),
+                    Profit=("P&L €", "sum"),
+                ).reset_index()
+                fig_stake = go.Figure(go.Bar(
+                    x=by_stake["StakeBand"].astype(str),
+                    y=by_stake["Profit"],
+                    text=[f"€{v:.1f}" for v in by_stake["Profit"]],
+                    textposition="outside",
+                    marker_color=["#00D4AA" if v >= 0 else "#FF5252" for v in by_stake["Profit"]],
+                ))
+                fig_stake.update_layout(
+                    height=300, template="plotly_dark",
+                    xaxis_title="Fascia stake", yaxis_title="Profit €",
+                    margin=dict(t=20, b=20, l=20, r=20),
+                )
+                st.plotly_chart(fig_stake, width="stretch")
+            else:
+                st.caption("Servono stake più vari per costruire fasce significative.")
+
+        an3, an4 = st.columns(2)
+        with an3:
+            st.markdown("**Heatmap giorno × mercato (ROI %)**")
+            chiuse_h = chiuse.copy()
+            chiuse_h["Weekday"] = chiuse_h["Data_dt"].dt.day_name()
+            order_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+            chiuse_h["Weekday"] = pd.Categorical(chiuse_h["Weekday"], categories=order_days, ordered=True)
+            pv = chiuse_h.pivot_table(
+                index="Weekday",
+                columns="Stat",
+                values="P&L €",
+                aggfunc="sum",
+                fill_value=0.0,
+            )
+            pv_stake = chiuse_h.pivot_table(
+                index="Weekday",
+                columns="Stat",
+                values="Stake €",
+                aggfunc="sum",
+                fill_value=0.0,
+            ).replace(0, pd.NA)
+            roi_mat = (pv / pv_stake * 100).fillna(0.0)
+            fig_heat = go.Figure(data=go.Heatmap(
+                z=roi_mat.values,
+                x=[str(c) for c in roi_mat.columns],
+                y=[str(i) for i in roi_mat.index],
+                colorscale="RdYlGn",
+                zmid=0,
+                colorbar=dict(title="ROI %"),
+            ))
+            fig_heat.update_layout(
+                height=320, template="plotly_dark",
+                margin=dict(t=20, b=20, l=20, r=20),
+            )
+            st.plotly_chart(fig_heat, width="stretch")
+
+        with an4:
+            st.markdown("**Trend rolling ROI (7 bets) + Drawdown**")
+            tr = chiuse.sort_values("Data_dt", ascending=True).copy()
+            tr["CumPnl"] = tr["P&L €"].cumsum()
+            tr["CumStake"] = tr["Stake €"].cumsum().replace(0, pd.NA)
+            tr["CumROI"] = (tr["CumPnl"] / tr["CumStake"] * 100).fillna(0.0)
+            tr["RollPnl"] = tr["P&L €"].rolling(7, min_periods=3).sum()
+            tr["RollStake"] = tr["Stake €"].rolling(7, min_periods=3).sum().replace(0, pd.NA)
+            tr["RollROI"] = (tr["RollPnl"] / tr["RollStake"] * 100).fillna(0.0)
+            tr["Equity"] = float(st.session_state.bankroll_start) + tr["CumPnl"]
+            tr["EqPeak"] = tr["Equity"].cummax()
+            tr["Drawdown%"] = ((tr["Equity"] - tr["EqPeak"]) / tr["EqPeak"] * 100).fillna(0.0)
+            dd_now = float(tr["Drawdown%"].iloc[-1]) if not tr.empty else 0.0
+            dd_worst = float(tr["Drawdown%"].min()) if not tr.empty else 0.0
+            st.caption(f"Drawdown attuale: **{dd_now:.1f}%** · Max drawdown: **{dd_worst:.1f}%**")
+
+            fig_roll = go.Figure()
+            fig_roll.add_trace(go.Scatter(
+                x=tr["Data_dt"], y=tr["RollROI"], mode="lines+markers",
+                name="ROI rolling (7 bets)", line=dict(color="#00D4AA", width=2)
+            ))
+            fig_roll.add_trace(go.Scatter(
+                x=tr["Data_dt"], y=tr["CumROI"], mode="lines",
+                name="ROI cumulato", line=dict(color="#FFD600", width=1.5, dash="dot")
+            ))
+            fig_roll.add_hline(y=0, line_dash="dash", line_color="#8B949E")
+            fig_roll.update_layout(
+                height=320, template="plotly_dark",
+                yaxis_title="ROI %", xaxis_title="Data",
+                margin=dict(t=20, b=20, l=20, r=20),
+            )
+            st.plotly_chart(fig_roll, width="stretch")
+
     # ── Editor scommesse pendenti ───────────────────────────────────────────
     pendenti_idx = [i for i, b in enumerate(st.session_state.bets)
                     if b.get("Risultato", "In attesa") == "In attesa"]
