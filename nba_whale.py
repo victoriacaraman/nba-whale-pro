@@ -48,6 +48,25 @@ if _ICON_192:
 if _ICON_512:
     _icon_entries.append('{"src":"data:image/png;base64,' + _ICON_512 + '","sizes":"512x512","type":"image/png","purpose":"any maskable"}')
 
+# iOS/Android PWA cache bust + icone pubbliche (se disponibili) per evitare fallback Streamlit
+_PWA_ICON_192_URL = os.environ.get(
+    "PWA_ICON_192_URL",
+    "https://raw.githubusercontent.com/victoriacaraman/nba-whale-pro/main/icon-192.png",
+).strip()
+_PWA_ICON_512_URL = os.environ.get(
+    "PWA_ICON_512_URL",
+    "https://raw.githubusercontent.com/victoriacaraman/nba-whale-pro/main/icon-512.png",
+).strip()
+_PWA_CACHE_TAG = f"v={VERSION}"
+
+if _PWA_ICON_192_URL and _PWA_ICON_512_URL:
+    _manifest_icons = (
+        f'{{"src":"{_PWA_ICON_192_URL}?{_PWA_CACHE_TAG}","sizes":"192x192","type":"image/png","purpose":"any maskable"}},'
+        f'{{"src":"{_PWA_ICON_512_URL}?{_PWA_CACHE_TAG}","sizes":"512x512","type":"image/png","purpose":"any maskable"}}'
+    )
+else:
+    _manifest_icons = ",".join(_icon_entries)
+
 _PWA_MANIFEST = (
     '{'
     '"name":"NBA Whale Pro",'
@@ -59,35 +78,44 @@ _PWA_MANIFEST = (
     '"orientation":"portrait",'
     '"background_color":"#0E1117",'
     '"theme_color":"#00D4AA",'
-    f'"icons":[{",".join(_icon_entries)}]'
+    f'"icons":[{_manifest_icons}]'
     '}'
 )
 # Codifico in base64 per passarlo dentro lo script JS senza problemi di escaping
 _MANIFEST_B64 = base64.b64encode(_PWA_MANIFEST.encode("utf-8")).decode("ascii")
 
 # Favicon (sostituisce quello di default di Streamlit)
-_favicon_192 = (
-    f'<link rel="icon" type="image/png" sizes="192x192" href="data:image/png;base64,{_ICON_192}">'
-    if _ICON_192 else ""
-)
-_favicon_512 = (
-    f'<link rel="icon" type="image/png" sizes="512x512" href="data:image/png;base64,{_ICON_512}">'
-    if _ICON_512 else ""
-)
-_shortcut_icon = (
-    f'<link rel="shortcut icon" type="image/png" href="data:image/png;base64,{_ICON_192}">'
-    if _ICON_192 else ""
-)
+if _PWA_ICON_192_URL and _PWA_ICON_512_URL:
+    _favicon_192 = f'<link rel="icon" type="image/png" sizes="192x192" href="{_PWA_ICON_192_URL}?{_PWA_CACHE_TAG}">'
+    _favicon_512 = f'<link rel="icon" type="image/png" sizes="512x512" href="{_PWA_ICON_512_URL}?{_PWA_CACHE_TAG}">'
+    _shortcut_icon = f'<link rel="shortcut icon" type="image/png" href="{_PWA_ICON_192_URL}?{_PWA_CACHE_TAG}">'
+else:
+    _favicon_192 = (
+        f'<link rel="icon" type="image/png" sizes="192x192" href="data:image/png;base64,{_ICON_192}">'
+        if _ICON_192 else ""
+    )
+    _favicon_512 = (
+        f'<link rel="icon" type="image/png" sizes="512x512" href="data:image/png;base64,{_ICON_512}">'
+        if _ICON_512 else ""
+    )
+    _shortcut_icon = (
+        f'<link rel="shortcut icon" type="image/png" href="data:image/png;base64,{_ICON_192}">'
+        if _ICON_192 else ""
+    )
 
 # Apple-touch-icon (per "Aggiungi a Home" su iOS Safari)
-_apple_icon_tag = (
-    f'<link rel="apple-touch-icon" sizes="192x192" href="data:image/png;base64,{_ICON_192}">'
-    if _ICON_192 else ""
-)
-_apple_icon_512 = (
-    f'<link rel="apple-touch-icon" sizes="512x512" href="data:image/png;base64,{_ICON_512}">'
-    if _ICON_512 else ""
-)
+if _PWA_ICON_192_URL and _PWA_ICON_512_URL:
+    _apple_icon_tag = f'<link rel="apple-touch-icon" sizes="192x192" href="{_PWA_ICON_192_URL}?{_PWA_CACHE_TAG}">'
+    _apple_icon_512 = f'<link rel="apple-touch-icon" sizes="512x512" href="{_PWA_ICON_512_URL}?{_PWA_CACHE_TAG}">'
+else:
+    _apple_icon_tag = (
+        f'<link rel="apple-touch-icon" sizes="192x192" href="data:image/png;base64,{_ICON_192}">'
+        if _ICON_192 else ""
+    )
+    _apple_icon_512 = (
+        f'<link rel="apple-touch-icon" sizes="512x512" href="data:image/png;base64,{_ICON_512}">'
+        if _ICON_512 else ""
+    )
 
 _PWA_HEAD = f"""
 <link rel="manifest" href='data:application/manifest+json;utf8,{_PWA_MANIFEST}'>
