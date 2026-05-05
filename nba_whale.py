@@ -658,6 +658,169 @@ def _safe_float(value, default=0.0):
         return float(default)
 
 
+def _safe_pct(value, default=float("nan")):
+    """Percentuali API come stringa '44.2' o '44.2%'."""
+    try:
+        if value is None or value == "":
+            return default
+        s = str(value).strip().rstrip("%")
+        return float(s)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_plus_minus(value, default=float("nan")):
+    if value is None or value == "":
+        return default
+    try:
+        return float(str(value).strip().replace("+", ""))
+    except (TypeError, ValueError):
+        return default
+
+
+def enrich_boxscore_derived(df: pd.DataFrame) -> pd.DataFrame:
+    """Aggiunge eFG%, TS%, usage proxy di volume (FGA-based) e rate tiri liberi/tre."""
+    if df is None or df.empty:
+        return df
+    need_min = {"FGM", "FGA", "TPM", "TPA", "FTA", "PTS"}
+    if not need_min.issubset(df.columns):
+        return df
+    out = df.copy()
+    fgm = pd.to_numeric(out["FGM"], errors="coerce")
+    fga = pd.to_numeric(out["FGA"], errors="coerce")
+    tpm = pd.to_numeric(out["TPM"], errors="coerce")
+    tpa = pd.to_numeric(out["TPA"], errors="coerce")
+    fta = pd.to_numeric(out["FTA"], errors="coerce")
+    pts = pd.to_numeric(out["PTS"], errors="coerce")
+    out["eFG_PCT"] = (fgm + 0.5 * tpm) / fga.replace(0, pd.NA) * 100
+    den_ts = 2.0 * (fga + 0.44 * fta)
+    out["TS_PCT"] = pts / den_ts.replace(0, pd.NA) * 100
+    out["FTR"] = fta / fga.replace(0, pd.NA)
+    out["three_RATE"] = tpa / fga.replace(0, pd.NA)
+    out["USG_PROXY"] = fga + 0.44 * fta + pd.to_numeric(out.get("TOV", 0), errors="coerce").fillna(0)
+    return out
+
+
+@st.cache_data(ttl=86400)
+def fetch_player_bio(player_id: int) -> dict | None:
+    """Profilo anagrafico + fisico (API `/players?id=`)."""
+    if not player_id or not API_KEY:
+        return None
+    try:
+        r = _api_get("/players", {"id": int(player_id)})
+        resp = r.json().get("response", []) or []
+        return resp[0] if resp else None
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600)
+def fetch_team_statistics_season(team_id: int, season: str) -> dict | None:
+    """Aggregati stagionali di squadra (`/teams/statistics`) — attacco, rimbalzi, ecc."""
+    if not team_id or not API_KEY:
+        return None
+    try:
+        r = _api_get("/teams/statistics", {"id": int(team_id), "season": str(season)})
+        resp = r.json().get("response", []) or []
+        return resp[0] if resp else None
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=3600)
+def fetch_standings_by_team(season: str) -> dict[int, dict]:
+    """Mappa team_id → riga classifica (`/standings`, league standard)."""
+    if not API_KEY:
+        return {}
+    try:
+        r = _api_get("/standings", {"league": "standard", "season": str(season)})
+        rows = r.json().get("response", []) or []
+        out = {}
+        for item in rows:
+            tid = (item.get("team") or {}).get("id")
+            if tid is not None:
+                out[int(tid)] = item
+        return out
+    except Exception:
+        return {}
+
+
+def _standing_one_liner(item: dict | None) -> str | None:
+    if not item:
+        return None
+    team = item.get("team") or {}
+    code = team.get("code", "?")
+    w = (item.get("win") or {}).get("total")
+    l = (item.get("loss") or {}).get("total")
+    pct = (item.get("win") or {}).get("percentage")
+    w10 = (item.get("win") or {}).get("lastTen")
+    l10 = (item.get("loss") or {}).get("lastTen")
+    crk = (item.get("conference") or {}).get("rank")
+    parts = [f"{code} **{w}-{l}** ({pct})" if pct is not None else f"{code} **{w}-{l}**"]
+    if w10 is not None and l10 is not None:
+        parts.append(f"L10: **{w10}-{l10}**")
+    if crk is not None:
+        parts.append(f"Conf #{crk}")
+    streak = item.get("streak")
+    ws = item.get("winStreak")
+    if streak is not None:
+        tag = "W" if ws else "L"
+        parts.append(f"Serie: **{streak}{tag}**")
+    return " · ".join(parts)
+
+
+def _team_season_rates(raw: dict) -> dict[str, float]:
+    """PPG/RPG/… per gara da blob `/teams/statistics`."""
+    if not raw:
+        return {}
+    g = max(1, int(raw.get("games", 1) or 1))
+    out = {}
+    for key, col in [
+        ("PPG", "points"),
+        ("RPG", "totReb"),
+        ("APG", "assists"),
+        ("TPG", "turnovers"),
+        ("SPG", "steals"),
+        ("BPG", "blocks"),
+        ("PF_pg", "pFouls"),
+    ]:
+        v = raw.get(col)
+        if v is not None:
+            out[key] = float(v) / g
+    for key, col in [("FG_PCT", "fgp"), ("FT_PCT", "ftp"), ("TP_PCT", "tpp")]:
+        p = raw.get(col)
+        if p is not None and p != "":
+            out[key] = _safe_pct(p)
+    return out
+
+
+def _format_player_bio_caption(bio: dict | None) -> str:
+    if not bio:
+        return ""
+    std_lg = (bio.get("leagues") or {}).get("standard") or {}
+    pos = std_lg.get("pos") or ""
+    h = bio.get("height") or {}
+    wgt = bio.get("weight") or {}
+    nba = bio.get("nba") or {}
+    birth = (bio.get("birth") or {}).get("date", "")
+    m = h.get("meters") or "?"
+    kg = wgt.get("kilograms") or "?"
+    pro = nba.get("pro", "")
+    bits = []
+    if pos:
+        bits.append(f"Ruolo **{pos}**")
+    if m != "?":
+        bits.append(f"altezza **{m} m**")
+    if kg != "?":
+        bits.append(f"peso **{kg} kg**")
+    if pro != "" and pro is not None:
+        bits.append(f"pro **{pro}** anni")
+    if birth:
+        bits.append(f"nato **{birth}**")
+    return " · ".join(bits) if bits else ""
+
+
+
 def _game_status_short(game_obj: dict) -> int | None:
     """`status.short` da API NBA: 1=Not Started · 2=Live · 3=Finished · 4+
     Vedi docs api-sports.io."""
@@ -1025,6 +1188,278 @@ def _format_next_game_when(start_iso: str) -> tuple:
         return start_iso, None
 
 
+def _last_game_date_from_df(df_all: pd.DataFrame):
+    if df_all is None or df_all.empty or "GAME_DATE" not in df_all.columns:
+        return None
+    s = pd.to_datetime(df_all["GAME_DATE"], errors="coerce").dropna()
+    if s.empty:
+        return None
+    d = s.max()
+    return d.date() if hasattr(d, "date") else d
+
+
+def _probable_nba_back_to_back(df_all: pd.DataFrame, next_start_iso: str) -> tuple[bool, str]:
+    last_d = _last_game_date_from_df(df_all)
+    if last_d is None:
+        return False, "Ultima partita non ricavabile dai dati del giocatore."
+    try:
+        dt_next = datetime.datetime.fromisoformat(next_start_iso.replace("Z", "+00:00")).date()
+    except Exception:
+        return False, "Data/ora prossima partita non leggibile."
+    gap = (dt_next - last_d).days
+    if gap == 1:
+        return True, "Tra l’ultima gara registrata e la prossima c’è **1 giorno** → tipico back‑to‑back NBA."
+    if gap == 0:
+        return True, "Ultima gara e prossima calendario **stesso giorno** → turno molto fitto."
+    return False, f"Circa **{gap} giorni** di distanza dall’ultima gara (più riposo)."
+
+
+def _loc_split_avg(df_r: pd.DataFrame, col: str, loc: str, min_games: int = 3):
+    """Media della stat nella sede indicata (solo se abbastanza campioni)."""
+    if df_r is None or df_r.empty or "LOC" not in df_r.columns or col not in df_r.columns:
+        return None
+    sub = df_r[df_r["LOC"] == loc]
+    if len(sub) < min_games:
+        return None
+    return float(sub[col].mean())
+
+
+def compute_toolkit_multifactor_projection(
+    player_name: str,
+    df_all: pd.DataFrame,
+    df_r: pd.DataFrame,
+    linee: dict,
+    season: str,
+):
+    """
+    Prossima partita + attese PTS/REB/AST con vista multifattoriale automatica:
+    baseline stagionale, storico vs avversario, split casa/trasferta, forma (trend),
+    injury report entrambe le squadre, minuti “extra” stimati, possibile B2B.
+    """
+
+    def _fail(msg: str):
+        return {"ok": False, "reason": msg}
+
+    if df_all is None or df_all.empty:
+        return _fail("Nessun dato partite.")
+    team_id = _player_team_id_from_df(df_all)
+    if not team_id:
+        return _fail("Impossibile ricavare la squadra corrente dal box score.")
+
+    next_game = find_next_game_for_team(int(team_id), season)
+    if not next_game:
+        return _fail("Calendario API: nessuna partita futura per questa squadra.")
+
+    opp = _opponent_info_from_game(next_game, int(team_id))
+    oid = int(opp.get("opponent_id") or 0)
+    date_str, days_from_now = _format_next_game_when(opp.get("start_iso") or "")
+
+    inj_my = fetch_team_injuries(int(team_id), season)
+    inj_opp = fetch_team_injuries(oid, season) if oid else []
+    impact_my = infer_injury_impact(inj_my)
+    impact_opp = infer_injury_impact(inj_opp)
+    player_inj_status = _injury_status_for_alerts(player_name, inj_my)
+
+    pts_l = float(linee.get("PTS", 0) or 0)
+    reb_l = float(linee.get("REB", 0) or 0)
+    ast_l = float(linee.get("AST", 0) or 0)
+
+    season_pts = float(df_all["PTS"].mean()) if "PTS" in df_all.columns else 0.0
+    season_reb = float(df_all["REB"].mean()) if "REB" in df_all.columns else 0.0
+    season_ast = float(df_all["AST"].mean()) if "AST" in df_all.columns else 0.0
+
+    df_vs_opp = pd.DataFrame()
+    if "MATCHUP" in df_all.columns and opp.get("opponent_code"):
+        df_vs_opp = df_all[df_all["MATCHUP"].apply(_extract_opponent) == opp["opponent_code"]]
+
+    n_vs = len(df_vs_opp)
+    if n_vs > 0:
+        vs_pts = float(df_vs_opp["PTS"].mean())
+        vs_reb = float(df_vs_opp["REB"].mean())
+        vs_ast = float(df_vs_opp["AST"].mean())
+        blend_w = max(0.4, min(0.7, n_vs / 5.0))
+        base_pts = vs_pts * blend_w + season_pts * (1 - blend_w)
+        base_reb = vs_reb * blend_w + season_reb * (1 - blend_w)
+        base_ast = vs_ast * blend_w + season_ast * (1 - blend_w)
+        matchup_note = (
+            f"Storico vs **{opp['opponent_code']}**: {n_vs} gare — peso sul risultato ~**{blend_w * 100:.0f}%** "
+            f"(mix con media stagionale)."
+        )
+    else:
+        base_pts, base_reb, base_ast = season_pts, season_reb, season_ast
+        matchup_note = (
+            f"Nessuna partita vs **{opp.get('opponent_code', '?')}** in questo dataset → si usa solo la **media stagionale**."
+        )
+
+    loc_label = opp.get("location") or "?"
+    loc_key = "Home" if loc_label == "Home" else "Away"
+    split_pts = _loc_split_avg(df_r, "PTS", loc_key)
+    split_reb = _loc_split_avg(df_r, "REB", loc_key)
+    split_ast = _loc_split_avg(df_r, "AST", loc_key)
+
+    adj_pts, adj_reb, adj_ast = base_pts, base_reb, base_ast
+    sede_parts = []
+    if split_pts is not None and season_pts > 0:
+        r_pts = max(0.88, min(1.12, split_pts / season_pts))
+        adj_pts *= r_pts
+        sede_parts.append(f"PTS in questa sede (ultime gare): ×**{r_pts:.2f}** vs media stagione")
+    if split_reb is not None and season_reb > 0:
+        adj_reb *= max(0.90, min(1.10, split_reb / season_reb))
+    if split_ast is not None and season_ast > 0:
+        adj_ast *= max(0.90, min(1.10, split_ast / season_ast))
+    sede_note = (
+        " · ".join(sede_parts)
+        if sede_parts
+        else f"Split casa/trasferta non usato (serve ≥3 gare {loc_key} nella finestra)."
+    )
+
+    def _trend_delta(col: str) -> float:
+        if col not in df_r.columns or len(df_r) < 5:
+            return 0.0
+        a = float(df_r.head(3)[col].mean())
+        b = float(df_r.head(min(10, len(df_r)))[col].mean())
+        return a - b
+
+    t_pts, t_reb, t_ast = _trend_delta("PTS"), _trend_delta("REB"), _trend_delta("AST")
+    form_pts = max(-2.0, min(2.0, t_pts * 0.35))
+    form_reb = max(-1.5, min(1.5, t_reb * 0.35))
+    form_ast = max(-1.5, min(1.5, t_ast * 0.35))
+    adj_pts += form_pts
+    adj_reb += form_reb
+    adj_ast += form_ast
+    forma_note = (
+        f"Forma breve (media ultime 3 vs ultime 10): PTS **{t_pts:+.1f}**, REB **{t_reb:+.1f}**, AST **{t_ast:+.1f}** "
+        f"→ aggiustamento conservativo applicato."
+    )
+
+    usage_boost = impact_my["usage_loss_pct"] / 100.0
+    defense_boost = impact_opp["weighted_impact"] / 100.0
+    total_boost = max(-0.25, min(0.25, usage_boost * 0.6 + defense_boost * 0.4))
+    inj_note = (
+        f"Infortuni: **{impact_my['out_count']}** OUT / **{impact_my['questionable_count']}** dubbi nella sua squadra "
+        f"(usage stimato “liberato” ~**{impact_my['usage_loss_pct']:.1f}%**); "
+        f"nella squadra avversaria stress difesa stimato ~**{impact_opp['weighted_impact']:.1f}** "
+        f"→ moltiplicatore combinato sul box score **{1 + total_boost:.3f}**."
+    )
+
+    adj_pts_inj = adj_pts * (1 + total_boost)
+    adj_reb_inj = adj_reb * (1 + total_boost * 0.6)
+    adj_ast_inj = adj_ast * (1 + total_boost * 0.6)
+
+    min_series = (
+        df_r["MIN"].map(_parse_minutes)
+        if "MIN" in df_r.columns
+        else pd.Series(dtype=float)
+    )
+    min_avg = float(pd.to_numeric(min_series, errors="coerce").dropna().mean() or 28.0)
+    delta_min = min(
+        10.0,
+        impact_my["out_count"] * 1.2 + impact_my["questionable_count"] * 0.4,
+    )
+    min_scale = 1.0 + max(-0.06, min(0.08, (delta_min / max(min_avg, 12.0)) * 0.35))
+    min_note = (
+        f"Minuti medi ~**{min_avg:.1f}**; con assenze nei compagni stimiamo **+{delta_min:.1f}** ‘slot’ minuti "
+        f"→ fattore **×{min_scale:.3f}** sulle stat di volume."
+    )
+
+    pre_b2b_pts = adj_pts_inj * min_scale
+    pre_b2b_reb = adj_reb_inj * min_scale
+    pre_b2b_ast = adj_ast_inj * min_scale
+
+    b2b, b2b_note = _probable_nba_back_to_back(df_all, opp.get("start_iso") or "")
+    b2b_factor = 0.965 if b2b else 1.0
+    final_pts = pre_b2b_pts * b2b_factor
+    final_reb = pre_b2b_reb * b2b_factor
+    final_ast = pre_b2b_ast * b2b_factor
+
+    def _p_over(lam: float, line: float) -> float:
+        if lam <= 0:
+            return 0.0
+        return min(99.5, max(0.0, (1 - poisson.cdf(line, lam)) * 100))
+
+    p_pts = _p_over(final_pts, pts_l)
+    p_reb = _p_over(final_reb, reb_l)
+    p_ast = _p_over(final_ast, ast_l)
+
+    factor_rows = [
+        {
+            "Step": "1 · Baseline stagionale",
+            "PTS": round(season_pts, 2),
+            "REB": round(season_reb, 2),
+            "AST": round(season_ast, 2),
+        },
+        {
+            "Step": "2 · Mix storico vs avversario",
+            "PTS": round(base_pts, 2),
+            "REB": round(base_reb, 2),
+            "AST": round(base_ast, 2),
+        },
+        {
+            "Step": "3 · + Sede & forma",
+            "PTS": round(adj_pts, 2),
+            "REB": round(adj_reb, 2),
+            "AST": round(adj_ast, 2),
+        },
+        {
+            "Step": "4 · + Infortuni (attacco/difesa)",
+            "PTS": round(adj_pts_inj * min_scale, 2),
+            "REB": round(adj_reb_inj * min_scale, 2),
+            "AST": round(adj_ast_inj * min_scale, 2),
+        },
+        {
+            "Step": "5 · Finale (± B2B)",
+            "PTS": round(final_pts, 2),
+            "REB": round(final_reb, 2),
+            "AST": round(final_ast, 2),
+        },
+    ]
+
+    narrative = [
+        matchup_note,
+        f"**Sede:** {loc_key} — {sede_note}",
+        forma_note,
+        inj_note,
+        min_note,
+        f"**Calendario:** {b2b_note}",
+    ]
+    std_map = fetch_standings_by_team(season)
+    line_my = _standing_one_liner(std_map.get(int(team_id)))
+    line_op = _standing_one_liner(std_map.get(int(oid))) if oid else None
+    if line_my:
+        narrative.append(f"**Classifica (API):** tua squadra — {line_my}")
+    if line_op:
+        narrative.append(f"**Classifica (API):** avversario — {line_op}")
+
+    return {
+        "ok": True,
+        "team_id": int(team_id),
+        "opponent_id": oid,
+        "opponent": opp,
+        "date_str": date_str,
+        "days_from_now": days_from_now,
+        "impact_my": impact_my,
+        "impact_opp": impact_opp,
+        "inj_my": inj_my,
+        "inj_opp": inj_opp,
+        "player_injury_status": player_inj_status,
+        "b2b": b2b,
+        "b2b_note": b2b_note,
+        "b2b_factor": b2b_factor,
+        "factor_rows": factor_rows,
+        "narrative": narrative,
+        "season_pts": season_pts,
+        "final_pts": final_pts,
+        "final_reb": final_reb,
+        "final_ast": final_ast,
+        "p_over_pts": p_pts,
+        "p_over_reb": p_reb,
+        "p_over_ast": p_ast,
+        "total_boost": total_boost,
+        "min_scale": min_scale,
+        "trend_pts_short": t_pts,
+    }
+
+
 @st.cache_data(ttl=1800)
 def get_nba_data(player_id: int, player_name: str, season: str, api_key: str, phase_selected: str = "Tutte"):
     """
@@ -1052,12 +1487,28 @@ def get_nba_data(player_id: int, player_name: str, season: str, api_key: str, ph
             gm  = game_map.get(gid, {})
 
             pts = _safe_float(entry.get("points", 0))
-            reb = _safe_float(entry.get("totReb", 0) or entry.get("rebounds", 0))
+            oreb = _safe_float(entry.get("offReb", 0))
+            dreb = _safe_float(entry.get("defReb", 0))
+            reb = _safe_float(
+                entry.get("totReb", 0) or entry.get("rebounds", 0) or (oreb + dreb)
+            )
             ast = _safe_float(entry.get("assists", 0))
             stl = _safe_float(entry.get("steals", 0))
             blk = _safe_float(entry.get("blocks", 0))
             tov = _safe_float(entry.get("turnovers", 0))
             min_p = str(entry.get("min", "0") or "0")
+            fgm = _safe_float(entry.get("fgm", 0))
+            fga = _safe_float(entry.get("fga", 0))
+            fg_pct_api = _safe_pct(entry.get("fgp"))
+            ftm = _safe_float(entry.get("ftm", 0))
+            fta = _safe_float(entry.get("fta", 0))
+            ft_pct_api = _safe_pct(entry.get("ftp"))
+            tpm = _safe_float(entry.get("tpm", 0))
+            tpa = _safe_float(entry.get("tpa", 0))
+            tp_pct_api = _safe_pct(entry.get("tpp"))
+            pf = _safe_float(entry.get("pFouls", 0))
+            pm = _safe_plus_minus(entry.get("plusMinus"))
+            pos_g = str(entry.get("pos", "") or "").strip()
 
             game_date  = gm.get("date", "")
             home_id    = gm.get("home_id")
@@ -1069,15 +1520,27 @@ def get_nba_data(player_id: int, player_name: str, season: str, api_key: str, ph
             matchup = (f"{home_code} vs {vis_code}" if loc == "Home"
                        else f"{vis_code} @ {home_code}")
 
+            try:
+                gid_i = int(gid) if gid is not None else None
+            except (TypeError, ValueError):
+                gid_i = None
             rows.append({
+                "GAME_ID": gid_i,
                 "GAME_DATE": game_date,
                 "MATCHUP":   matchup,
                 "LOC":       loc,
                 "PHASE":     phase,
                 "TEAM_ID":   team_id,
+                "POS": pos_g,
                 "PTS": pts, "REB": reb, "AST": ast,
+                "OREB": oreb, "DREB": dreb,
                 "STL": stl, "BLK": blk, "TOV": tov,
+                "PF": pf,
                 "MIN": min_p,
+                "PLUS_MINUS": pm,
+                "FGM": fgm, "FGA": fga, "FG_PCT": fg_pct_api,
+                "FTM": ftm, "FTA": fta, "FT_PCT": ft_pct_api,
+                "TPM": tpm, "TPA": tpa, "TP_PCT": tp_pct_api,
             })
 
         if not rows:
@@ -1091,6 +1554,7 @@ def get_nba_data(player_id: int, player_name: str, season: str, api_key: str, ph
             if df.empty:
                 return None
         df = df.sort_values("GAME_DATE", ascending=False).reset_index(drop=True)
+        df = enrich_boxscore_derived(df)
         return df
 
     except requests.exceptions.HTTPError as e:
@@ -1810,8 +2274,12 @@ def _streak_label(streak_over: int, streak_under: int, stat: str) -> str:
 
 def toolkit_pro_page(linee: dict, n_partite: int):
     st.subheader("🧰 Toolkit Tipster Pro")
-    st.caption("Cruscotto visuale completo: medie, probabilità, trend, contesto e indicatori avanzati. "
-               "Le tabelle numeriche grezze sono accessibili negli expander '📋 Vedi tabella raw'.")
+    st.caption(
+        "Cruscotto visuale completo: medie, probabilità, trend, contesto e indicatori avanzati. "
+        "**Sotto il caricamento dati** trovi la **prossima partita** con attese **multifattoriali** automatiche "
+        "(storico vs avversario, casa/trasferta, forma, injury API, minuti, possibile back‑to‑back). "
+        "Le tabelle numeriche grezze sono negli expander '📋 Vedi tabella raw'."
+    )
     linee = render_line_inputs(expanded=False)
     query = st.text_input("Giocatore Toolkit", value="Luka Doncic", key="toolkit_player")
     if not query:
@@ -1830,6 +2298,163 @@ def toolkit_pro_page(linee: dict, n_partite: int):
 
     n_eff = len(df_all) if st.session_state.get("use_all_games", False) else n_partite
     df_r = df_all.head(max(1, n_eff)).copy()
+
+    # ── 🔮 Prossima partita · multifattoriale (API + storico) ─────────────
+    st.markdown("### 🔮 Prossima partita · cosa aspettarsi (automatico)")
+    _mf_help = (
+        "Stima **PTS / REB / AST** per la **prossima** gara del giocatore combinando: "
+        "(1) media stagionale, (2) storico contro questo avversario se disponibile, "
+        "(3) split **casa/trasferta** sulla finestra attiva, (4) **forma** (ultime 3 vs 10), "
+        "(5) **injury report** della sua squadra e dell’avversario (usage/difesa), "
+        "(6) piccolo aggiustamento **minuti** se mancano compagni, (7) malus se probabile **back‑to‑back**. "
+        "Le probabilità Over sulle linee usano **Poisson** sulla media finale stimata (euristica, non certificazione)."
+    )
+    with st.spinner("Matchup, calendario e injury report…"):
+        mf = compute_toolkit_multifactor_projection(name, df_all, df_r, linee, SEASON)
+    if not mf.get("ok"):
+        st.info(mf.get("reason") or "Proiezione non disponibile.")
+    else:
+        opp = mf["opponent"]
+        date_str = mf["date_str"]
+        days_from_now = mf["days_from_now"]
+        sede_lbl = "🏠 in casa" if opp.get("location") == "Home" else (
+            "✈️ in trasferta" if opp.get("location") == "Away" else "")
+        days_lbl = (
+            "🔴 OGGI" if days_from_now == 0
+            else "🟡 DOMANI" if days_from_now == 1
+            else f"⏳ Tra {days_from_now} giorni" if days_from_now is not None and days_from_now > 0
+            else ""
+        )
+        st.markdown(
+            f"""
+<div style="background:linear-gradient(135deg,#161B22 0%,#1c2735 100%);
+            border:1px solid #3B9EFF;border-radius:12px;padding:18px 20px;margin-bottom:14px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+        <div>
+            <span style="color:#8B949E;font-size:0.8rem;letter-spacing:1px;">PROSSIMA PARTITA · MODELLO MULTIFATTORIALE</span><br>
+            <strong style="color:#3B9EFF;font-size:1.25rem;">vs {opp.get('opponent_name', '?')} ({opp.get('opponent_code', '?')})</strong>
+            <span style="color:#E6EDF3;font-size:1rem;margin-left:8px;">{sede_lbl}</span>
+        </div>
+        <div style="text-align:right;">
+            <span style="color:#FFD600;font-size:1.05rem;font-weight:600;">{days_lbl}</span><br>
+            <span style="color:#8B949E;font-size:0.85rem;">{date_str}</span>
+        </div>
+    </div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+        pst = mf.get("player_injury_status") or "OK"
+        if pst == "OUT":
+            st.error(
+                f"🚨 **{name}** risulta **OUT / escluso** sull’injury report della squadra: "
+                "le proiezioni statistiche sono **ipoteciche** — verifica minuti e disponibilità reali."
+            )
+        elif pst == "Q":
+            st.warning(
+                f"⚠️ **{name}** risulta **in dubbio / questionable**: le attese possono cambiare fino all’ufficialità."
+            )
+
+        teams_opts = fetch_teams(SEASON) or []
+        by_label_id = {int(t["id"]): t.get("label") or t.get("name", "") for t in teams_opts}
+        tid_mf = mf.get("team_id")
+        oid_mf = mf.get("opponent_id")
+        if tid_mf and tid_mf in by_label_id:
+            st.session_state["team_1_id"] = tid_mf
+            st.session_state["team_1_label"] = by_label_id[tid_mf]
+        if oid_mf and oid_mf in by_label_id:
+            st.session_state["team_2_id"] = oid_mf
+            st.session_state["team_2_label"] = by_label_id[oid_mf]
+
+        ig1, ig2 = st.columns(2)
+        imy = mf["impact_my"]
+        iop = mf["impact_opp"]
+        with ig1:
+            st.markdown("##### 🩹 La sua squadra")
+            if imy["out_count"] == 0 and imy["questionable_count"] == 0:
+                st.success("Nessun OUT/Q rilevante in lista.")
+            else:
+                st.warning(
+                    f"OUT **{imy['out_count']}** · Dubbi **{imy['questionable_count']}** · "
+                    f"Usage stimato liberato **{imy['usage_loss_pct']:.1f}%**"
+                )
+                for note in imy["notes"][:4]:
+                    st.caption(f"• {note}")
+        with ig2:
+            st.markdown(f"##### 🩹 {opp.get('opponent_code', '?')} (avversario)")
+            if iop["out_count"] == 0 and iop["questionable_count"] == 0:
+                st.success("Nessun OUT/Q rilevante in lista.")
+            else:
+                st.warning(
+                    f"OUT **{iop['out_count']}** · Dubbi **{iop['questionable_count']}** · "
+                    f"Stress difesa stimato **{iop['weighted_impact']:.1f}**"
+                )
+                for note in iop["notes"][:4]:
+                    st.caption(f"• {note}")
+
+        pm1, pm2, pm3 = st.columns(3)
+        pm1.metric(
+            "PTS atteso",
+            f"{mf['final_pts']:.1f}",
+            delta=f"linea {linee['PTS']} · Poisson Over {mf['p_over_pts']:.0f}%",
+            help=_mf_help,
+        )
+        pm2.metric(
+            "REB atteso",
+            f"{mf['final_reb']:.1f}",
+            delta=f"linea {linee['REB']} · Over {mf['p_over_reb']:.0f}%",
+            help=_mf_help,
+        )
+        pm3.metric(
+            "AST atteso",
+            f"{mf['final_ast']:.1f}",
+            delta=f"linea {linee['AST']} · Over {mf['p_over_ast']:.0f}%",
+            help=_mf_help,
+        )
+
+        if mf.get("b2b"):
+            st.warning(f"🏃 **Back‑to‑back probabile** — {mf.get('b2b_note', '')}")
+
+        fig_mf = go.Figure()
+        fig_mf.add_trace(go.Bar(
+            name="Atteso (multifattoriale)",
+            x=["Punti", "Rimbalzi", "Assist"],
+            y=[mf["final_pts"], mf["final_reb"], mf["final_ast"]],
+            marker_color="#00D4AA",
+            text=[f"{mf['final_pts']:.1f}", f"{mf['final_reb']:.1f}", f"{mf['final_ast']:.1f}"],
+            textposition="outside",
+        ))
+        fig_mf.add_trace(go.Bar(
+            name="Linee Over/Under",
+            x=["Punti", "Rimbalzi", "Assist"],
+            y=[linee["PTS"], linee["REB"], linee["AST"]],
+            marker_color="#FF5252",
+            text=[str(linee["PTS"]), str(linee["REB"]), str(linee["AST"])],
+            textposition="outside",
+        ))
+        fig_mf.update_layout(
+            barmode="group",
+            height=320,
+            template="plotly_dark",
+            legend=dict(orientation="h", y=1.12),
+            margin=dict(t=40, b=20, l=20, r=20),
+            yaxis_title="Valore",
+        )
+        st.plotly_chart(fig_mf, width="stretch")
+
+        with st.expander("📐 Come si costruisce il numero finale (step-by-step)"):
+            st.dataframe(pd.DataFrame(mf["factor_rows"]), width="stretch", hide_index=True)
+            st.markdown("**Lettura rapida dei fattori:**")
+            for bullet in mf["narrative"]:
+                st.markdown(f"- {bullet}")
+            st.caption(
+                "💡 Per il tab **Contesto & Value Bet**, **Team 1 / Team 2** in sessione sono allineati "
+                "a **squadra del giocatore** e **avversario della prossima partita** così l’**auto‑injury** "
+                "trova subito i report corretti."
+            )
+
+    st.markdown("---")
 
     t_base, t_ctx, t_adv = st.tabs([
         "📊 Stat & Probabilità",
@@ -1852,6 +2477,19 @@ def toolkit_pro_page(linee: dict, n_partite: int):
         k4.metric("Prob Poisson PTS", f"{v(tools_df, '13'):.0f}%", help=TOOLTIPS["poisson"])
         k5.metric("Trend PTS (3G-10G)", f"{v(tools_df, '16'):+.2f}", help=TOOLTIPS["trend"])
         k6.metric("Confidenza", f"{v(tools_df, '40'):.0f}/100", help=TOOLTIPS["confidenza"])
+
+        if "eFG_PCT" in df_r.columns:
+            sx1, sx2, sx3 = st.columns(3)
+            _eg = float(pd.to_numeric(df_r["eFG_PCT"], errors="coerce").mean())
+            sx1.metric("eFG% (finestra dati)", f"{_eg:.1f}%",
+                       help="Effective FG%: (FGM + 0.5×3PM) / FGA. Stima dell’efficienza al tiro dal box score API.")
+            if "TS_PCT" in df_r.columns:
+                _ts = float(pd.to_numeric(df_r["TS_PCT"], errors="coerce").mean())
+                sx2.metric("TS% (finestra)", f"{_ts:.1f}%",
+                           help="True Shooting: PTS / (2×(FGA + 0.44×FTA)). Include tiri liberi.")
+            if "USG_PROXY" in df_r.columns:
+                sx3.metric("Usage proxy (vol.)", f"{float(df_r['USG_PROXY'].mean()):.1f}",
+                           help="Somma FGA + 0.44×FTA + TOV · proxy di volume d’attacco (non è l’USG% ufficiale NBA).")
 
         st.markdown("---")
         st.markdown("##### 📊 Medie a confronto · Ultime 5G · Ultime 10G · Stagione")
@@ -1967,8 +2605,12 @@ def toolkit_pro_page(linee: dict, n_partite: int):
     # ── TAB 2: Contesto & Value Bet ──────────────────────────────────────
     with t_ctx:
         st.markdown("##### 🩹 Input contesto partita")
-        st.caption("Inserisci assenze e fattori della partita (o lascia auto-detect dai team scelti in '🏀 Squadre' / '⚔️ Confronto'). "
-                   "Il modello applica un aggiustamento euristico alle probabilità.")
+        st.caption(
+            "Modifica i contatori manualmente oppure usa **auto-import injury**: la sezione "
+            "**Prossima partita · multifattoriale** aggiorna automaticamente **Team 1** (suo team) e "
+            "**Team 2** (avversario) così i report infortuni coincidono col matchup imminente. "
+            "Il modello applica aggiustamenti euristici alle probabilità."
+        )
         auto_inj = st.checkbox("Auto-import injury report (beta)", value=True, key="auto_inj_beta")
         auto_summary = {}
         if auto_inj:
@@ -1996,15 +2638,22 @@ def toolkit_pro_page(linee: dict, n_partite: int):
                     for note in auto_summary["opp_notes"][:6]:
                         st.write(f"- {note}")
             else:
-                st.caption("Per auto-injury, seleziona Team 1 e Team 2 in sidebar.")
+                st.caption(
+                    "Auto-injury non ha ancora due squadre valide: assicurati che il giocatore abbia una "
+                    "**prossima partita** in calendario (vedi sezione multifattoriale sopra) oppure compila i numeri a mano."
+                )
 
         c1, c2, c3 = st.columns(3)
         teammate_out_count = c1.number_input("Compagni OUT", min_value=0, max_value=12,
             value=int(auto_summary.get("teammate_out_count", 1)), step=1)
         opp_out_count = c2.number_input("Avversari OUT", min_value=0, max_value=12,
             value=int(auto_summary.get("opp_out_count", 1)), step=1)
-        b2b_flag = c3.checkbox("Back-to-back", value=False,
-                               help="Seconda partita consecutiva: spesso minore rendimento.")
+        b2b_flag = c3.checkbox(
+            "Back-to-back",
+            value=False,
+            help="Attivalo se la sezione multifattoriale segnala un possibile back-to-back. "
+                 "Seconda partita consecutiva: spesso rendimento leggermente inferiore.",
+        )
         c4, c5, c6 = st.columns(3)
         teammate_usage_loss = c4.slider("Usage perso compagni %", 0, 60,
             int(round(auto_summary.get("teammate_usage_loss", 12))),
@@ -2920,6 +3569,114 @@ def bankroll_page():
 #  SINGLE PLAYER PAGE
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _render_extended_player_analysis(
+    pid: int,
+    name: str,
+    df_all: pd.DataFrame,
+    df_r: pd.DataFrame,
+    my_team_id: int | None,
+    n_window: int,
+):
+    """Box score API completo, tiri avanzati, medie di squadra e classifica."""
+    with st.expander(
+        "📚 Dataset esteso · box score API, profilo, squadra, classifica",
+        expanded=False,
+    ):
+        st.caption(
+            "Per ogni partita: **FGA/FGM/3P/FT**, rimbalzi off/def, falli, **+/-**, "
+            "oltre **eFG%**, **TS%**, **usage proxy** (volume). Fonti: "
+            "`/players/statistics` · `/players` · `/teams/statistics` · `/standings`."
+        )
+        with st.spinner("Profilo giocatore…"):
+            bio = fetch_player_bio(pid)
+        cap = _format_player_bio_caption(bio or {})
+        if cap:
+            st.markdown(f"**Profilo:** {cap}")
+        else:
+            st.caption("Profilo anagrafico non restituito dall’API per questo ID.")
+
+        need_s = {"FGM", "FGA", "TPM", "TPA", "FTA", "FTM", "PTS"}
+        if need_s.issubset(df_r.columns):
+            fga_sum = max(float(df_r["FGA"].sum()), 1e-6)
+            tpa_sum = max(float(df_r["TPA"].sum()), 1e-6)
+            fta_sum = max(float(df_r["FTA"].sum()), 1e-6)
+            m_fgp = float(df_r["FGM"].sum()) / fga_sum * 100
+            m_tpp = float(df_r["TPM"].sum()) / tpa_sum * 100
+            m_ftp = float(df_r["FTM"].sum()) / fta_sum * 100
+            h1, h2, h3 = st.columns(3)
+            h1.metric(f"FG% effettivo ({n_window} gare)", f"{m_fgp:.1f}%")
+            h2.metric("3P% effettivo", f"{m_tpp:.1f}%")
+            h3.metric("FT% effettivo", f"{m_ftp:.1f}%")
+
+        if "eFG_PCT" in df_r.columns:
+            eg = float(pd.to_numeric(df_r["eFG_PCT"], errors="coerce").mean())
+            ts_m = (
+                float(pd.to_numeric(df_r["TS_PCT"], errors="coerce").mean())
+                if "TS_PCT" in df_r.columns
+                else float("nan")
+            )
+            q1, q2, q3 = st.columns(3)
+            q1.metric("eFG% medio (finestra)", f"{eg:.1f}%")
+            q2.metric("TS% medio (finestra)", f"{ts_m:.1f}%" if ts_m == ts_m else "—")
+            if "USG_PROXY" in df_r.columns:
+                q3.metric("Usage proxy medio", f"{float(df_r['USG_PROXY'].mean()):.1f}")
+
+        if my_team_id:
+            with st.spinner("Statistiche di squadra…"):
+                ts_raw = fetch_team_statistics_season(int(my_team_id), SEASON)
+            if ts_raw:
+                rates = _team_season_rates(ts_raw)
+                g_ct = max(1, int(ts_raw.get("games", 1) or 1))
+                st.markdown(
+                    f"##### 🏀 Squadra attuale · aggregati stagionali (n≈{g_ct} partite squadra)"
+                )
+                tcols = st.columns(6)
+                disp = [
+                    ("PPG", "Punti/partita"),
+                    ("RPG", "Rimb/partita"),
+                    ("APG", "Ass/partita"),
+                    ("TPG", "Palle p./partita"),
+                    ("FG_PCT", "FG% stag."),
+                    ("TP_PCT", "3P% stag."),
+                ]
+                for i, (rk, label) in enumerate(disp):
+                    if rk in rates:
+                        val = rates[rk]
+                        fmt = f"{val:.1f}%" if "PCT" in rk else f"{val:.1f}"
+                        tcols[i % 6].metric(label, fmt)
+
+        std = fetch_standings_by_team(SEASON)
+        if my_team_id and int(my_team_id) in std:
+            s1 = _standing_one_liner(std.get(int(my_team_id)))
+            if s1:
+                st.markdown(f"**Classifica · squadra del giocatore:** {s1}")
+
+        show_cols = [
+            c for c in [
+                "GAME_ID",
+                "GAME_DATE", "MATCHUP", "PTS", "REB", "AST", "MIN",
+                "FGM", "FGA", "FG_PCT", "TPM", "TPA", "TP_PCT", "FTM", "FTA", "FT_PCT",
+                "OREB", "DREB", "STL", "BLK", "TOV", "PF", "PLUS_MINUS", "POS",
+                "eFG_PCT", "TS_PCT", "USG_PROXY", "FTR", "three_RATE",
+            ]
+            if c in df_all.columns
+        ]
+        if show_cols:
+            st.markdown("##### 📋 Anteprima partite (colonne estese)")
+            st.dataframe(
+                df_all[show_cols].head(min(30, len(df_all))),
+                width="stretch",
+                hide_index=True,
+            )
+            st.download_button(
+                "⬇️ CSV · tutte le partite con colonne estese",
+                data=df_to_csv(df_all.sort_values("GAME_DATE", ascending=False)),
+                file_name=f"{name.replace(' ', '_')}_box_extended_{SEASON}.csv",
+                mime="text/csv",
+                key="dl_ext_player_csv",
+            )
+
+
 def single_player_page(linee: dict, n_partite: int, n_slump: int):
     linee = render_line_inputs(expanded=False)
     query = st.text_input("🔍 Cerca giocatore NBA",
@@ -2965,10 +3722,11 @@ def single_player_page(linee: dict, n_partite: int, n_slump: int):
     c3.metric("AST medi", f"{avg_ast:.1f}")
     if "STL" in df_r.columns: c4.metric("STL medi", f"{df_r['STL'].mean():.1f}")
     if "BLK" in df_r.columns: c5.metric("BLK medi", f"{df_r['BLK'].mean():.1f}")
+    my_team_id = _player_team_id_from_df(df_all)
+    _render_extended_player_analysis(pid, resolved_name, df_all, df_r, my_team_id, n_eff)
     st.markdown("---")
 
     # ── 🗓️ Prossima Partita (auto da api-sports) ─────────────────────────
-    my_team_id = _player_team_id_from_df(df_all)
     next_game = find_next_game_for_team(my_team_id, SEASON) if my_team_id else None
 
     if next_game:
@@ -3140,11 +3898,20 @@ def single_player_page(linee: dict, n_partite: int, n_slump: int):
         st.markdown("""
 - `PTS`: punti
 - `REB`: rimbalzi totali
+- `OREB` / `DREB`: rimbalzi offensivi / difensivi
 - `AST`: assist
+- `FGM` / `FGA` / `FG_PCT`: canestri / tentativi / % dal campo (API)
+- `TPM` / `TPA` / `TP_PCT`: triple segnate / tentate / %
+- `FTM` / `FTA` / `FT_PCT`: liberi segnati / tentati / %
 - `STL`: steals (palle rubate)
 - `BLK`: blocks (stoppate)
 - `TOV`: turnovers (palle perse)
+- `PF`: falli personali
+- `PLUS_MINUS`: più/meno di squadra quando era in campo
 - `MIN`: minuti giocati
+- `POS`: ruolo nella partita (box score)
+- `eFG_PCT` / `TS_PCT`: efficienza tiro avanzata (derivata)
+- `USG_PROXY` / `FTR` / `three_RATE`: volume attacco proxy, rapporto liberi/tiri, quota triple sui tentativi
 - `LOC`: sede partita (`Home`/`Away`)
 - `PHASE`: tipo partita (`Regular Season`/`Play-In`/`Playoff`)
 - `H2H`: head-to-head (testa a testa)
@@ -5331,6 +6098,48 @@ def health_page():
                 st.warning("Odds API: nessun evento o key non valida.")
         except Exception as exc:
             st.error(f"Errore Odds API: {exc}")
+
+    test_cols_b = st.columns(3)
+    if test_cols_b[0].button("Test /standings"):
+        try:
+            mp = fetch_standings_by_team(SEASON)
+            st.success(f"/standings OK · {len(mp)} squadre in mappa")
+        except Exception as exc:
+            st.error(f"Errore: {exc}")
+    if test_cols_b[1].button("Test /teams/statistics"):
+        try:
+            teams_try = fetch_teams(SEASON)
+            tid = teams_try[0]["id"] if teams_try else None
+            if tid:
+                st_raw = fetch_team_statistics_season(int(tid), SEASON)
+                st.success(f"/teams/statistics OK · games={st_raw.get('games') if st_raw else '—'}")
+            else:
+                st.warning("Nessun team per test.")
+        except Exception as exc:
+            st.error(f"Errore: {exc}")
+    if test_cols_b[2].button("Test /players (profilo)"):
+        try:
+            sample = next(iter(PLAYER_IDS.values()), None)
+            if sample:
+                bio_t = fetch_player_bio(int(sample))
+                st.success(f"/players OK · {bio_t.get('firstname', '') if bio_t else 'vuoto'}")
+            else:
+                st.warning("DB player vuoto.")
+        except Exception as exc:
+            st.error(f"Errore: {exc}")
+
+    st.markdown("---")
+    st.markdown("#### 📦 Colonne dataset giocatore (per analisi)")
+    st.caption(
+        "Dopo un aggiornamento dati, usa **Pulisci cache dati** sotto così Streamlit ricarica i box score estesi."
+    )
+    _cols_help = pd.DataFrame([
+        {"Colonna": "Box score API", "Contenuto": "FGM, FGA, FG_PCT, TPM/TPA/TP_PCT, FTM/FTA, OREB, DREB, PF, PLUS_MINUS, POS, GAME_ID"},
+        {"Colonna": "Derivate", "Contenuto": "eFG_PCT, TS_PCT, FTR, three_RATE, USG_PROXY (euristiche)"},
+        {"Colonna": "Contesto", "Contenuto": "GAME_DATE, MATCHUP, LOC, PHASE, TEAM_ID"},
+        {"Colonna": "Altri endpoint", "Contenuto": "Profilo `/players`, squadra `/teams/statistics`, classifica `/standings` (on-demand)"},
+    ])
+    st.dataframe(_cols_help, width="stretch", hide_index=True)
 
     st.markdown("---")
     st.markdown("#### 🛡 Validatore roster vs API")
