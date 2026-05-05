@@ -3764,6 +3764,13 @@ def tipster_dashboard_page():
 #  ABOUT PAGE
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _navigate_to(target_page: str):
+    """Callback per cambiare la pagina selezionata nel radio della sidebar.
+    Va eseguita in un on_click (fra un rerun e l'altro) altrimenti Streamlit
+    rifiuta la modifica di una key già usata da un widget."""
+    st.session_state["nav_page"] = target_page
+
+
 def home_page():
     """Schermata principale: logo + grid di tutte le funzioni cliccabili."""
     if _ICON_192:
@@ -3845,9 +3852,13 @@ def home_page():
 """,
                     unsafe_allow_html=True,
                 )
-                if st.button(f"Apri →", key=f"home_btn_{target_page}", width="stretch"):
-                    st.session_state["nav_page"] = target_page
-                    st.rerun()
+                st.button(
+                    "Apri →",
+                    key=f"home_btn_{target_page}",
+                    width="stretch",
+                    on_click=_navigate_to,
+                    args=(target_page,),
+                )
 
     st.markdown("---")
     # Stato configurazione veloce
