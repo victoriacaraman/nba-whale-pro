@@ -1882,7 +1882,7 @@ def toolkit_pro_page(linee: dict, n_partite: int):
     # ── TAB 2: Contesto & Value Bet ──────────────────────────────────────
     with t_ctx:
         st.markdown("##### 🩹 Input contesto partita")
-        st.caption("Inserisci assenze e fattori della partita (o lascia auto-detect dai team in sidebar). "
+        st.caption("Inserisci assenze e fattori della partita (o lascia auto-detect dai team scelti in '🏀 Squadre' / '⚔️ Confronto'). "
                    "Il modello applica un aggiustamento euristico alle probabilità.")
         auto_inj = st.checkbox("Auto-import injury report (beta)", value=True, key="auto_inj_beta")
         auto_summary = {}
@@ -2948,6 +2948,18 @@ def single_player_page(linee: dict, n_partite: int, n_slump: int):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def comparison_page(linee: dict, n_partite: int, n_slump: int):
+    st.subheader("⚔️ Confronto")
+    cmp_mode = st.radio(
+        "Tipo di confronto",
+        ["👤 Giocatori", "🏀 Squadre"],
+        horizontal=True,
+        key="cmp_mode",
+        label_visibility="collapsed",
+    )
+    if cmp_mode == "🏀 Squadre":
+        teams_comparison_page(n_partite, embedded=True)
+        return
+
     linee = render_line_inputs(expanded=False)
     cp1, cp2 = st.columns(2)
     q1 = cp1.text_input("Giocatore 1", value="LeBron James", key="cmp_p1",
@@ -3583,16 +3595,213 @@ def _defense_delta_label(delta_pa: float):
     return "🟡 Neutro"
 
 
-def teams_comparison_page(n_partite: int):
-    st.subheader("🏀 Confronto Squadre")
-    team1_id = st.session_state.get("team_1_id")
-    team2_id = st.session_state.get("team_2_id")
-    team1_label = st.session_state.get("team_1_label", "Team 1")
-    team2_label = st.session_state.get("team_2_label", "Team 2")
+def _team_picker(label: str, key_prefix: str, default_label: str | None = None):
+    """Renderizza un selectbox di squadra IN-PAGINA e ritorna (team_id, team_label).
+
+    Aggiorna anche `st.session_state[f"{key_prefix}_id"]` e `_label`
+    per retro-compatibilità con altre pagine che li leggono.
+    """
+    teams_opts = fetch_teams(SEASON)
+    if not teams_opts:
+        st.warning("Team list non disponibile (API). Riprova fra poco.")
+        if st.button("🔄 Riprova caricamento team", key=f"retry_{key_prefix}"):
+            fetch_teams.clear()
+            st.rerun()
+        return None, None
+
+    labels = [t["label"] for t in teams_opts]
+    fallback = default_label if default_label in labels else labels[0]
+    current = st.session_state.get(f"{key_prefix}_label", fallback)
+    if current not in labels:
+        current = fallback
+    idx = labels.index(current)
+    chosen = st.selectbox(label, labels, index=idx, key=f"{key_prefix}_label")
+    lookup = {t["label"]: t["id"] for t in teams_opts}
+    team_id = lookup.get(chosen)
+    st.session_state[f"{key_prefix}_id"] = team_id
+    return team_id, chosen
+
+
+def _current_streak(results: list) -> str:
+    """Da una lista di 'W'/'L' più recenti in alto, ritorna la streak corrente."""
+    if not results:
+        return "—"
+    first = results[0]
+    n = 0
+    for r in results:
+        if r == first:
+            n += 1
+        else:
+            break
+    return f"{first}{n}"
+
+
+def team_stats_page(n_partite: int):
+    """Scheda statistica completa di UNA squadra: attacco, difesa e 12+ metriche."""
+    st.subheader("🏀 Scheda Squadra")
+    st.caption(
+        "Statistiche complete di una singola squadra: attacco, difesa, trend, "
+        "streak, distribuzione punteggi, casa/trasferta e altro."
+    )
     phase_selected = st.session_state.get("phase_type", "Tutte")
 
+    team_id, team_label = _team_picker(
+        "🏀 Squadra da analizzare",
+        key_prefix="team_1",
+        default_label="Los Angeles Lakers (LAL)",
+    )
+    if not team_id:
+        return
+
+    with st.spinner(f"Caricamento dati {team_label}..."):
+        df = fetch_team_comparison_data(team_id, SEASON, phase_selected)
+
+    if isinstance(df, str) or df is None or df.empty:
+        st.error("Nessun dato disponibile per questa squadra con i filtri attuali.")
+        return
+
+    n_eff = min(n_partite, len(df))
+    d = df.head(n_eff).copy()
+    st.caption(f"Filtro: {phase_selected} · Ultime {n_eff}/{len(df)} gare disponibili")
+
+    pf_mean = float(d["PF"].mean())
+    pa_mean = float(d["PA"].mean())
+    diff_mean = pf_mean - pa_mean
+    wins = (d["RESULT"] == "W").sum()
+    losses = (d["RESULT"] == "L").sum()
+    win_rate = wins / len(d) * 100 if len(d) else 0.0
+    pf_full = float(df["PF"].mean())
+    pa_full = float(df["PA"].mean())
+
+    wins_df = d[d["RESULT"] == "W"]
+    losses_df = d[d["RESULT"] == "L"]
+    avg_margin_w = float(wins_df["DIFF"].mean()) if not wins_df.empty else 0.0
+    avg_margin_l = float(losses_df["DIFF"].mean()) if not losses_df.empty else 0.0
+
+    high_score_pct = float((d["PF"] >= 120).mean() * 100)
+    low_score_pct = float((d["PF"] < 100).mean() * 100)
+    shutdown_pct = float((d["PA"] < 100).mean() * 100)
+    blowout_pct = float((d["DIFF"].abs() >= 15).mean() * 100)
+
+    streak_now = _current_streak(d["RESULT"].tolist())
+    last5 = "".join(d["RESULT"].head(5).tolist())
+    pf_max = int(d["PF"].max()) if not d.empty else 0
+    pf_min = int(d["PF"].min()) if not d.empty else 0
+    pa_max = int(d["PA"].max()) if not d.empty else 0
+    pa_min = int(d["PA"].min()) if not d.empty else 0
+
+    pf_recent = float(d.head(5)["PF"].mean()) if len(d) >= 1 else 0.0
+    pa_recent = float(d.head(5)["PA"].mean()) if len(d) >= 1 else 0.0
+    trend_att = pf_recent - pf_full
+    trend_def = pa_recent - pa_full
+
+    st.markdown(f"### 🟢 {team_label}")
+    st.markdown(
+        f'<div class="verdict-box" style="border-left:4px solid #00D4AA;">'
+        f'📊 <strong>{wins}V – {losses}S</strong> '
+        f'· Win Rate <strong>{win_rate:.0f}%</strong> '
+        f'· Streak: <strong>{streak_now}</strong> '
+        f'· Ultime 5: <code>{last5 or "—"}</code>'
+        f'</div>', unsafe_allow_html=True)
+
+    st.markdown("#### ⚔️ Attacco e Difesa")
+    a1, a2, a3, a4 = st.columns(4)
+    a1.metric("Attacco (PF medi)", f"{pf_mean:.1f}",
+              delta=f"{(pf_mean - pf_full):+.1f} vs stagione",
+              help="Punti fatti in media dalla squadra nelle ultime gare. Più alti = attacco prolifico.")
+    a2.metric("Difesa (PA medi)", f"{pa_mean:.1f}",
+              delta=f"{(pa_mean - pa_full):+.1f} vs stagione", delta_color="inverse",
+              help="Punti subiti in media. Più bassi = difesa più solida.")
+    a3.metric("Net Rating", f"{diff_mean:+.1f}",
+              help="Differenza punti media (PF − PA). Positivo = squadra dominante; negativo = in difficoltà.")
+    a4.metric("Win Rate", f"{win_rate:.0f}%",
+              delta=f"{wins}V / {losses}S",
+              help="Percentuale di partite vinte sulle ultime gare considerate.")
+
+    st.markdown("#### 📈 Forma e Trend recenti")
+    t1, t2, t3, t4 = st.columns(4)
+    t1.metric("Trend Attacco (5G)", f"{pf_recent:.1f}", delta=f"{trend_att:+.1f}",
+              help="Media PF ultime 5 partite vs media stagionale. Positivo = in forma offensiva.")
+    t2.metric("Trend Difesa (5G)", f"{pa_recent:.1f}", delta=f"{trend_def:+.1f}",
+              delta_color="inverse",
+              help="Media PA ultime 5 vs stagionale. Negativo = difesa migliorata.")
+    t3.metric("Streak attuale", streak_now,
+              help="Sequenza di vittorie (W) o sconfitte (L) consecutive nelle gare più recenti.")
+    t4.metric("Ultime 5", last5 or "—",
+              help="Ordine cronologico (più recente a sinistra). Es. 'WWLWW' = 4 vinte e 1 persa nelle ultime 5.")
+
+    st.markdown("#### 🎯 Profilo Performance")
+    p1, p2, p3, p4 = st.columns(4)
+    p1.metric("% gare ≥120 PF", f"{high_score_pct:.0f}%",
+              help="Quante volte la squadra ha sfondato i 120 punti. Indicatore di attacco esplosivo.")
+    p2.metric("% gare <100 PF", f"{low_score_pct:.0f}%",
+              help="Quante volte la squadra è stata sotto i 100 punti. Attacco bloccato.")
+    p3.metric("% gare con difesa <100", f"{shutdown_pct:.0f}%",
+              help="Quante volte la difesa ha tenuto l'avversario sotto i 100 punti.")
+    p4.metric("% blowout (±15)", f"{blowout_pct:.0f}%",
+              help="Percentuale di partite chiuse con uno scarto ≥15 punti. Squadra polarizzata.")
+
+    st.markdown("#### 📊 Estremi e Margini")
+    e1, e2, e3, e4 = st.columns(4)
+    e1.metric("Margine medio nelle V", f"{avg_margin_w:+.1f}" if wins else "—",
+              help="Quanto vince in media (differenza PF-PA nelle vittorie).")
+    e2.metric("Margine medio nelle S", f"{avg_margin_l:+.1f}" if losses else "—",
+              help="Quanto perde in media (differenza PF-PA nelle sconfitte).")
+    e3.metric("Best PF", f"{pf_max}",
+              help="Punteggio massimo segnato nelle gare considerate.")
+    e4.metric("Worst PA", f"{pa_max}",
+              help="Massimo punteggio subito nelle gare considerate (peggior performance difensiva).")
+
+    st.markdown("---")
+    st.markdown("#### 📈 Trend Punti Fatti / Subiti")
+    fig_t = go.Figure()
+    fig_t.add_trace(go.Scatter(
+        x=d["GAME_DATE"], y=d["PF"], mode="lines+markers", name="Punti Fatti",
+        line=dict(color="#00D4AA", width=2.5)))
+    fig_t.add_trace(go.Scatter(
+        x=d["GAME_DATE"], y=d["PA"], mode="lines+markers", name="Punti Subiti",
+        line=dict(color="#FF5252", width=2.5)))
+    fig_t.add_hline(y=pf_mean, line_dash="dot", line_color="#00D4AA",
+                    annotation_text=f"Media PF {pf_mean:.1f}")
+    fig_t.add_hline(y=pa_mean, line_dash="dot", line_color="#FF5252",
+                    annotation_text=f"Media PA {pa_mean:.1f}")
+    fig_t.update_layout(height=360, template="plotly_dark",
+                        xaxis_title="Data", yaxis_title="Punti",
+                        margin=dict(t=20, b=20, l=20, r=20))
+    st.plotly_chart(fig_t, width="stretch")
+
+    st.markdown("#### 🎲 Distribuzione esiti (W/L)")
+    dist_fig = go.Figure(go.Bar(
+        x=["Vittorie", "Sconfitte"], y=[int(wins), int(losses)],
+        marker_color=["#00D4AA", "#FF5252"],
+        text=[int(wins), int(losses)], textposition="outside",
+    ))
+    dist_fig.update_layout(height=260, template="plotly_dark",
+                           margin=dict(t=20, b=20, l=20, r=20),
+                           yaxis_title="Numero partite")
+    st.plotly_chart(dist_fig, width="stretch")
+
+    with st.expander("📋 Tabella partite considerate"):
+        st.dataframe(d, width="stretch", hide_index=True)
+
+
+def teams_comparison_page(n_partite: int, embedded: bool = False):
+    if not embedded:
+        st.subheader("🏀 Confronto Squadre")
+        st.caption("Confronta due squadre NBA: attacco, difesa, trend e testa-a-testa.")
+    phase_selected = st.session_state.get("phase_type", "Tutte")
+
+    cps1, cps2 = st.columns(2)
+    with cps1:
+        team1_id, team1_label = _team_picker(
+            "Squadra 1", key_prefix="team_1",
+            default_label="Los Angeles Lakers (LAL)")
+    with cps2:
+        team2_id, team2_label = _team_picker(
+            "Squadra 2", key_prefix="team_2",
+            default_label="Boston Celtics (BOS)")
+
     if not team1_id or not team2_id:
-        st.info("Seleziona due squadre dalla sidebar per avviare il confronto.")
         return
     if team1_id == team2_id:
         st.warning("Seleziona due squadre diverse.")
@@ -3898,15 +4107,23 @@ def _scan_value_with_real_odds(api_key: str, n_partite: int, phase_selected: str
 def value_alerts_page(linee: dict, n_partite: int):
     st.subheader("🚨 Alert Value Giornata")
     st.caption("Scanner value-bet con linee/quote reali da The Odds API + fallback manuale.")
-
-    team1_id = st.session_state.get("team_1_id")
-    team2_id = st.session_state.get("team_2_id")
-    team1_label = st.session_state.get("team_1_label", "Team 1")
-    team2_label = st.session_state.get("team_2_label", "Team 2")
     phase_selected = st.session_state.get("phase_type", "Tutte")
 
+    with st.expander("🏀 Squadre della giornata (per modalità manuale)", expanded=False):
+        st.caption("Le due squadre selezionate qui vengono usate solo dallo scanner manuale "
+                   "per scegliere i giocatori. La modalità Auto le ignora.")
+        cva, cvb = st.columns(2)
+        with cva:
+            team1_id, team1_label = _team_picker(
+                "Team 1", key_prefix="team_1",
+                default_label="Los Angeles Lakers (LAL)")
+        with cvb:
+            team2_id, team2_label = _team_picker(
+                "Team 2", key_prefix="team_2",
+                default_label="Boston Celtics (BOS)")
+
     if not team1_id or not team2_id:
-        st.info("Seleziona Team 1 e Team 2 in sidebar.")
+        st.info("Seleziona Team 1 e Team 2 dall'expander qui sopra.")
         return
 
     mode = st.radio(
@@ -4633,24 +4850,6 @@ with st.sidebar:
     st.checkbox("Usa tutte le partite giocate", value=False, key="use_all_games")
     st.markdown("---")
 
-    st.markdown("**🏀 Confronto squadre**")
-    teams_opts = fetch_teams(SEASON)
-    if teams_opts:
-        labels = [t["label"] for t in teams_opts]
-        default_1 = labels.index("Los Angeles Lakers (LAL)") if "Los Angeles Lakers (LAL)" in labels else 0
-        default_2 = labels.index("Boston Celtics (BOS)") if "Boston Celtics (BOS)" in labels else min(1, len(labels) - 1)
-        t1_label = st.selectbox("Squadra 1", labels, index=default_1, key="team_1_label")
-        t2_label = st.selectbox("Squadra 2", labels, index=default_2, key="team_2_label")
-        lookup = {t["label"]: t["id"] for t in teams_opts}
-        st.session_state.team_1_id = lookup.get(t1_label)
-        st.session_state.team_2_id = lookup.get(t2_label)
-    else:
-        st.caption("Team list non disponibile (API).")
-        if st.button("🔄 Riprova caricamento team"):
-            fetch_teams.clear()
-            st.rerun()
-
-    st.markdown("---")
     api_ok = "🟢 Configurata" if API_KEY else "🔴 Mancante"
     st.caption(f"API Key: {api_ok}")
     with st.expander("📚 Legenda veloce acronimi"):
@@ -4672,7 +4871,7 @@ if not API_KEY and pagina not in ("🏠 Home", "ℹ️ Guida"):
 if   pagina == "🏠 Home":            home_page()
 elif pagina == "📊 Analisi Singolo": single_player_page(linee, n_partite, n_slump)
 elif pagina == "⚔️ Confronto":       comparison_page(linee, n_partite, n_slump)
-elif pagina == "🏀 Squadre":         teams_comparison_page(n_partite)
+elif pagina == "🏀 Squadre":         team_stats_page(n_partite)
 elif pagina == "🚨 Alert Value":     value_alerts_page(linee, n_partite)
 elif pagina == "🧰 Toolkit Pro":     toolkit_pro_page(linee, n_partite)
 elif pagina == "📈 Tipster Pro":     tipster_dashboard_page()
