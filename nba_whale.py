@@ -602,6 +602,35 @@ def _safe_float(value, default=0.0):
         return float(default)
 
 
+def _game_status_short(game_obj: dict) -> int | None:
+    """`status.short` da API NBA: 1=Not Started · 2=Live · 3=Finished · 4+
+    Vedi docs api-sports.io."""
+    try:
+        st = (game_obj.get("status") or {}).get("short")
+        return int(st) if st is not None and st != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _side_score_total(side_scores: dict) -> float:
+    """Punteggio finale casa/trasferta da `scores.home` / `scores.visitors`.
+
+    L'API v2 usa in genere `points`; alcuni contesti espongono `total` o solo
+    `linescore` (quarti)."""
+    if not side_scores:
+        return 0.0
+    pts = side_scores.get("points")
+    if pts is not None and str(pts).strip() != "":
+        return _safe_float(pts)
+    tot = side_scores.get("total")
+    if tot is not None and str(tot).strip() != "":
+        return _safe_float(tot)
+    ls = side_scores.get("linescore")
+    if isinstance(ls, (list, tuple)) and ls:
+        return sum(_safe_float(q) for q in ls)
+    return 0.0
+
+
 def _api_get(path: str, params: dict):
     last_err = None
     for attempt in range(1, MAX_RETRIES + 1):
@@ -3289,8 +3318,6 @@ def fetch_team_comparison_data(team_id: int, season: str, phase_selected: str):
             scores = g.get("scores", {}) or {}
             home = teams.get("home", {}) or {}
             vis = teams.get("visitors", {}) or {}
-            home_score = _safe_float((scores.get("home") or {}).get("points"))
-            vis_score = _safe_float((scores.get("visitors") or {}).get("points"))
             date = ((g.get("date", {}) or {}).get("start", "") or "")[:10]
             stage_val = (
                 g.get("stage")
@@ -3301,7 +3328,27 @@ def fetch_team_comparison_data(team_id: int, season: str, phase_selected: str):
             phase = _normalize_phase_label(stage_val)
             if not _phase_matches(phase_selected, phase):
                 continue
-            is_home = team_id == home.get("id")
+
+            # Solo partite TERMINATE (altrimenti calendario futuro = 0 punti e medie assurde ~20-30)
+            st_code = _game_status_short(g)
+            if st_code != 3:
+                continue
+
+            home_id = home.get("id")
+            vis_id = vis.get("id")
+            try:
+                hid = int(home_id) if home_id is not None else None
+                vid = int(vis_id) if vis_id is not None else None
+                tid = int(team_id)
+            except (TypeError, ValueError):
+                continue
+            if hid is None or vid is None:
+                continue
+            is_home = tid == hid
+            home_score = _side_score_total(scores.get("home") or {})
+            vis_score = _side_score_total(scores.get("visitors") or {})
+            if home_score <= 0 or vis_score <= 0:
+                continue
             pf = home_score if is_home else vis_score
             pa = vis_score if is_home else home_score
             rows.append({
@@ -3335,9 +3382,14 @@ def fetch_head_to_head_data(team1_id: int, team2_id: int, season: str, phase_sel
             scores = g.get("scores", {}) or {}
             home = teams.get("home", {}) or {}
             vis = teams.get("visitors", {}) or {}
-            home_id = home.get("id")
-            vis_id = vis.get("id")
-            if {home_id, vis_id} != {team1_id, team2_id}:
+            try:
+                hid = int(home.get("id"))
+                vid = int(vis.get("id"))
+                t1 = int(team1_id)
+                t2 = int(team2_id)
+            except (TypeError, ValueError):
+                continue
+            if {hid, vid} != {t1, t2}:
                 continue
             stage_val = (
                 g.get("stage")
@@ -3349,11 +3401,16 @@ def fetch_head_to_head_data(team1_id: int, team2_id: int, season: str, phase_sel
             if not _phase_matches(phase_selected, phase):
                 continue
 
-            home_score = _safe_float((scores.get("home") or {}).get("points"))
-            vis_score = _safe_float((scores.get("visitors") or {}).get("points"))
+            if _game_status_short(g) != 3:
+                continue
+
+            home_score = _side_score_total(scores.get("home") or {})
+            vis_score = _side_score_total(scores.get("visitors") or {})
+            if home_score <= 0 or vis_score <= 0:
+                continue
             date = ((g.get("date", {}) or {}).get("start", "") or "")[:10]
 
-            if home_id == team1_id:
+            if hid == t1:
                 t1_pf, t1_pa = home_score, vis_score
                 t2_pf, t2_pa = vis_score, home_score
             else:
@@ -3662,7 +3719,11 @@ def team_stats_page(n_partite: int):
 
     n_eff = min(n_partite, len(df))
     d = df.head(n_eff).copy()
-    st.caption(f"Filtro: {phase_selected} · Ultime {n_eff}/{len(df)} gare disponibili")
+    st.caption(f"Filtro: {phase_selected} · Ultime {n_eff}/{len(df)} gare **terminate** disponibili")
+    st.caption(
+        "**Nota:** *PF* qui = **punti segnati** dalla squadra ('Punti Fatti'); *PA* = punti subiti — "
+        "non sono i falli personali del box score NBA."
+    )
 
     pf_mean = float(d["PF"].mean())
     pa_mean = float(d["PA"].mean())
@@ -3817,7 +3878,8 @@ def teams_comparison_page(n_partite: int, embedded: bool = False):
 
     d1 = df1.head(n_partite).copy()
     d2 = df2.head(n_partite).copy()
-    st.caption(f"Filtro partite: {phase_selected} · Ultime {n_partite} gare")
+    st.caption(f"Filtro partite: {phase_selected} · Ultime **{n_partite} gare terminate** (ignoriamo "
+               "partite non ancora giocate: altrimenti punteggio 0 falserebbe le medie).")
 
     c1, c2 = st.columns(2)
     with c1:
