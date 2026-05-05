@@ -2483,9 +2483,7 @@ def bankroll_page():
         quota = c2.number_input("Quota", value=1.90, step=0.05, min_value=1.01)
         stake = c3.number_input("Stake (€)", value=20.0, step=5.0, min_value=1.0)
         risultato = c4.selectbox("Risultato", ["In attesa", "Vinto", "Perso"])
-        d1, d2 = st.columns(2)
-        bookmaker = d1.text_input("Bookmaker (opzionale)")
-        note = d2.text_input("Note (opzionale)")
+        note = st.text_input("Note (opzionale)")
         submit_bet = st.form_submit_button("Aggiungi scommessa")
         if submit_bet:
             if formato == "Singola" and not str(giocatore).strip():
@@ -2509,7 +2507,6 @@ def bankroll_page():
                     "Stake €": stake,
                     "Risultato": risultato,
                     "P&L €": profit,
-                    "Bookmaker": bookmaker,
                     "Numero Selezioni": int(n_legs) if formato == "Multipla" else 1,
                     "Dettagli Multipla": dettagli_multipla if formato == "Multipla" else "",
                     "Note": note,
@@ -2562,12 +2559,10 @@ def bankroll_page():
     df_bets = df_bets.sort_values("Data_dt", ascending=False).reset_index(drop=True)
 
     with st.expander("🔎 Filtri analisi", expanded=True):
-        f1, f2, f3, f4 = st.columns(4)
+        f1, f2, f4 = st.columns(3)
         period_opt = f1.selectbox("Periodo", ["Tutto", "Ultimi 7 giorni", "Ultimi 30 giorni", "Ultimi 90 giorni"], index=0)
         stat_opts = sorted([s for s in df_bets["Stat"].dropna().unique().tolist() if s])
         stat_sel = f2.multiselect("Mercato", stat_opts, default=stat_opts)
-        book_opts = sorted([b for b in df_bets["Bookmaker"].fillna("").unique().tolist() if str(b).strip()])
-        book_sel = f3.multiselect("Bookmaker", book_opts, default=book_opts)
         res_sel = f4.multiselect("Risultato", ["In attesa", "Vinto", "Perso"], default=["In attesa", "Vinto", "Perso"])
 
     df_view = df_bets.copy()
@@ -2577,8 +2572,6 @@ def bankroll_page():
         df_view = df_view[df_view["Data_dt"] >= cutoff]
     if stat_sel:
         df_view = df_view[df_view["Stat"].isin(stat_sel)]
-    if book_sel:
-        df_view = df_view[df_view["Bookmaker"].fillna("").isin(book_sel)]
     if res_sel:
         df_view = df_view[df_view["Risultato"].isin(res_sel)]
 
@@ -2669,24 +2662,6 @@ def bankroll_page():
             st.plotly_chart(fig_stat, width="stretch")
         else:
             st.info("Nessun breakdown disponibile.")
-
-    st.markdown("#### 🏦 Breakdown Bookmaker")
-    if not chiuse.empty and (chiuse["Bookmaker"].fillna("").str.strip() != "").any():
-        by_book = chiuse.copy()
-        by_book["Bookmaker"] = by_book["Bookmaker"].replace("", "N/A")
-        book_tbl = by_book.groupby("Bookmaker", dropna=False).agg(
-            Bets=("Bookmaker", "count"),
-            Stake=("Stake €", "sum"),
-            Profit=("P&L €", "sum"),
-            WinRate=("Risultato", lambda x: (x == "Vinto").mean() * 100),
-        ).reset_index().sort_values("Profit", ascending=False)
-        book_tbl["ROI %"] = book_tbl.apply(
-            lambda r: (r["Profit"] / r["Stake"] * 100) if r["Stake"] else 0.0,
-            axis=1,
-        )
-        st.dataframe(book_tbl, width="stretch", hide_index=True)
-    else:
-        st.caption("Nessun bookmaker compilato nelle scommesse chiuse.")
 
     st.markdown("#### 🧠 Analyzer")
     if chiuse.empty:
@@ -2859,7 +2834,7 @@ def bankroll_page():
 
     st.markdown("#### 📄 Storico Scommesse")
     show_cols = [
-        c for c in ["Data", "Formato", "Numero Selezioni", "Giocatore", "Dettagli Multipla", "Stat", "Tipo", "Linea", "Quota", "Stake €", "Risultato", "P&L €", "Bookmaker", "Note"]
+        c for c in ["Data", "Formato", "Numero Selezioni", "Giocatore", "Dettagli Multipla", "Stat", "Tipo", "Linea", "Quota", "Stake €", "Risultato", "P&L €", "Note"]
         if c in df_view.columns
     ]
     st.dataframe(df_view[show_cols], width="stretch", hide_index=True)
