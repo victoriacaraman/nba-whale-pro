@@ -2361,71 +2361,83 @@ def _recompute_bet_pnl(bet: dict) -> dict:
 
 def bankroll_page():
     init_bankroll()
-    st.subheader("💰 Tracker Bankroll")
-    st.caption("Registra le scommesse e monitora P&L, ROI e win rate in tempo reale. "
-               "Auto-salvataggio su file locale; CSV come backup definitivo.")
+    st.subheader("💰 Bankroll Analytics")
+    st.caption(
+        "Dashboard operativa stile analytics: KPI, equity curve, breakdown per mercato/bookmaker "
+        "e gestione completa dello storico."
+    )
 
     if os.path.exists(BANKROLL_FILE):
         try:
             mod_time = datetime.datetime.fromtimestamp(os.path.getmtime(BANKROLL_FILE))
-            st.caption(f"💾 Auto-save attivo · ultimo salvataggio {mod_time.strftime('%d/%m/%Y %H:%M:%S')}")
+            st.caption(f"💾 Auto-save locale attivo · ultimo salvataggio {mod_time.strftime('%d/%m/%Y %H:%M:%S')}")
         except Exception:
             pass
     else:
-        st.caption("💾 Auto-save attivo (il file verrà creato al primo inserimento).")
+        st.caption("💾 Auto-save locale attivo (il file verrà creato al primo inserimento).")
 
-    st.warning(
-        "ℹ️ Su **Streamlit Cloud** il filesystem è effimero: ad ogni redeploy il file "
-        "`bankroll_data.json` viene resettato. Esporta regolarmente il **CSV** come backup "
-        "e usa **Importa CSV** per ripristinare lo storico dopo un redeploy.",
-        icon="⚠️",
+    st.info(
+        "Su Streamlit Cloud il file locale può resettarsi dopo deploy/restart. "
+        "Usa **Esporta CSV** come backup periodico e **Importa CSV** per ripristino rapido."
     )
 
-    with st.expander("⚙️ Bankroll iniziale", expanded=len(st.session_state.bets) == 0):
-        new_start = st.number_input("Bankroll iniziale (€)",
-                                    value=st.session_state.bankroll_start,
-                                    min_value=1.0, step=50.0)
-        if st.button("Aggiorna bankroll"):
-            st.session_state.bankroll_start = new_start
+    with st.expander("⚙️ Setup bankroll", expanded=len(st.session_state.bets) == 0):
+        new_start = st.number_input(
+            "Bankroll iniziale (€)",
+            value=float(st.session_state.bankroll_start),
+            min_value=1.0,
+            step=50.0,
+        )
+        if st.button("Aggiorna bankroll iniziale"):
+            st.session_state.bankroll_start = float(new_start)
             _save_bankroll_state()
             st.rerun()
 
-    st.markdown("#### ➕ Registra Scommessa")
+    st.markdown("#### ➕ Inserisci scommessa")
     with st.form("add_bet"):
         b1, b2, b3 = st.columns(3)
         giocatore = b1.text_input("Giocatore")
-        stat_bet  = b2.selectbox("Stat", ["Punti", "Rimbalzi", "Assist"])
-        esito     = b3.selectbox("Tipo", ["Over", "Under"])
+        stat_bet = b2.selectbox("Mercato", ["Punti", "Rimbalzi", "Assist"])
+        esito = b3.selectbox("Direzione", ["Over", "Under"])
         c1, c2, c3, c4 = st.columns(4)
         linea_b = c1.number_input("Linea", value=20.0, step=0.5)
-        quota   = c2.number_input("Quota", value=1.90, step=0.05, min_value=1.01)
-        stake   = c3.number_input("Stake (€)", value=20.0, step=5.0, min_value=1.0)
-        vinto   = c4.selectbox("Risultato", ["In attesa", "Vinto", "Perso"])
-        note    = st.text_input("Note (opzionale)")
-        if st.form_submit_button("Aggiungi") and giocatore:
-            profit = (round(stake * (quota - 1), 2) if vinto == "Vinto"
-                      else (-stake if vinto == "Perso" else 0.0))
+        quota = c2.number_input("Quota", value=1.90, step=0.05, min_value=1.01)
+        stake = c3.number_input("Stake (€)", value=20.0, step=5.0, min_value=1.0)
+        risultato = c4.selectbox("Risultato", ["In attesa", "Vinto", "Perso"])
+        d1, d2 = st.columns(2)
+        bookmaker = d1.text_input("Bookmaker (opzionale)")
+        note = d2.text_input("Note (opzionale)")
+        if st.form_submit_button("Aggiungi scommessa") and giocatore:
+            profit = (round(stake * (quota - 1), 2) if risultato == "Vinto"
+                      else (-stake if risultato == "Perso" else 0.0))
             st.session_state.bets.append({
-                "Data": str(datetime.date.today()), "Giocatore": giocatore,
-                "Stat": stat_bet, "Tipo": esito, "Linea": linea_b,
-                "Quota": quota, "Stake €": stake, "Risultato": vinto,
-                "P&L €": profit, "Note": note,
+                "Data": str(datetime.date.today()),
+                "Giocatore": giocatore,
+                "Stat": stat_bet,
+                "Tipo": esito,
+                "Linea": linea_b,
+                "Quota": quota,
+                "Stake €": stake,
+                "Risultato": risultato,
+                "P&L €": profit,
+                "Bookmaker": bookmaker,
+                "Note": note,
             })
             _save_bankroll_state()
-            st.success(f"✅ Scommessa su {giocatore} registrata e salvata.")
+            st.success(f"✅ Scommessa su {giocatore} registrata.")
             st.rerun()
 
     if not st.session_state.bets:
-        st.info("Nessuna scommessa ancora. Usare il form sopra per iniziare.")
-        # Importa CSV anche con storico vuoto (utile per ripristino dopo redeploy)
-        st.markdown("#### 📤 Importa storico da CSV")
-        up = st.file_uploader("Carica CSV scommesse (esportato in precedenza)",
-                              type=["csv"], key="bk_import_empty")
+        st.info("Nessuna scommessa ancora. Inserisci dal form o importa CSV.")
+        up = st.file_uploader(
+            "📤 Importa storico da CSV",
+            type=["csv"],
+            key="bk_import_empty",
+        )
         if up is not None:
             try:
                 df_in = pd.read_csv(up)
-                required = {"Data", "Giocatore", "Stat", "Tipo", "Linea", "Quota",
-                            "Stake €", "Risultato"}
+                required = {"Data", "Giocatore", "Stat", "Tipo", "Linea", "Quota", "Stake €", "Risultato"}
                 if not required.issubset(set(df_in.columns)):
                     st.error(f"Colonne mancanti. Servono: {sorted(required)}")
                 else:
@@ -2440,45 +2452,143 @@ def bankroll_page():
                 st.error(f"Errore import CSV: {exc}")
         return
 
-    df_bets = pd.DataFrame(st.session_state.bets)
-    chiuse  = df_bets[df_bets["Risultato"] != "In attesa"]
-    pnl_tot  = chiuse["P&L €"].sum()     if not chiuse.empty else 0.0
-    stake_tot= chiuse["Stake €"].sum()   if not chiuse.empty else 0.0
-    roi      = (pnl_tot / stake_tot * 100) if stake_tot > 0 else 0.0
-    bankroll = st.session_state.bankroll_start + pnl_tot
-    vinte    = len(chiuse[chiuse["Risultato"] == "Vinto"])
-    wr       = (vinte / len(chiuse) * 100) if len(chiuse) > 0 else 0.0
+    df_bets = pd.DataFrame(st.session_state.bets).copy()
+    if "Bookmaker" not in df_bets.columns:
+        df_bets["Bookmaker"] = ""
+    if "Note" not in df_bets.columns:
+        df_bets["Note"] = ""
+    if "Data" in df_bets.columns:
+        df_bets["Data_dt"] = pd.to_datetime(df_bets["Data"], errors="coerce")
+    else:
+        df_bets["Data_dt"] = pd.NaT
+    df_bets = df_bets.sort_values("Data_dt", ascending=False).reset_index(drop=True)
 
-    s1, s2, s3, s4, s5 = st.columns(5)
-    s1.metric("Bankroll Attuale", f"€{bankroll:.2f}", delta=f"{pnl_tot:+.2f}")
-    s2.metric("P&L Totale",      f"€{pnl_tot:.2f}")
-    s3.metric("ROI",              f"{roi:.1f}%")
-    s4.metric("Win Rate",         f"{wr:.0f}%")
-    s5.metric("Scommesse totali", len(df_bets))
+    with st.expander("🔎 Filtri analisi", expanded=True):
+        f1, f2, f3, f4 = st.columns(4)
+        period_opt = f1.selectbox("Periodo", ["Tutto", "Ultimi 7 giorni", "Ultimi 30 giorni", "Ultimi 90 giorni"], index=0)
+        stat_opts = sorted([s for s in df_bets["Stat"].dropna().unique().tolist() if s])
+        stat_sel = f2.multiselect("Mercato", stat_opts, default=stat_opts)
+        book_opts = sorted([b for b in df_bets["Bookmaker"].fillna("").unique().tolist() if str(b).strip()])
+        book_sel = f3.multiselect("Bookmaker", book_opts, default=book_opts)
+        res_sel = f4.multiselect("Risultato", ["In attesa", "Vinto", "Perso"], default=["In attesa", "Vinto", "Perso"])
+
+    df_view = df_bets.copy()
+    if period_opt != "Tutto":
+        days = {"Ultimi 7 giorni": 7, "Ultimi 30 giorni": 30, "Ultimi 90 giorni": 90}[period_opt]
+        cutoff = pd.Timestamp(datetime.date.today() - datetime.timedelta(days=days))
+        df_view = df_view[df_view["Data_dt"] >= cutoff]
+    if stat_sel:
+        df_view = df_view[df_view["Stat"].isin(stat_sel)]
+    if book_sel:
+        df_view = df_view[df_view["Bookmaker"].fillna("").isin(book_sel)]
+    if res_sel:
+        df_view = df_view[df_view["Risultato"].isin(res_sel)]
+
+    chiuse = df_view[df_view["Risultato"] != "In attesa"].copy()
+    pnl_tot = float(chiuse["P&L €"].sum()) if not chiuse.empty else 0.0
+    stake_tot = float(chiuse["Stake €"].sum()) if not chiuse.empty else 0.0
+    roi = (pnl_tot / stake_tot * 100) if stake_tot > 0 else 0.0
+    bankroll_now = float(st.session_state.bankroll_start) + pnl_tot
+    vinte = int((chiuse["Risultato"] == "Vinto").sum()) if not chiuse.empty else 0
+    wr = (vinte / len(chiuse) * 100) if len(chiuse) > 0 else 0.0
+    avg_odds = float(chiuse["Quota"].mean()) if not chiuse.empty else 0.0
+    avg_stake = float(chiuse["Stake €"].mean()) if not chiuse.empty else 0.0
+    yield_pct = (pnl_tot / stake_tot * 100) if stake_tot > 0 else 0.0
+    pending_n = int((df_view["Risultato"] == "In attesa").sum()) if not df_view.empty else 0
+
+    k1, k2, k3, k4, k5, k6 = st.columns(6)
+    k1.metric("Bankroll", f"€{bankroll_now:.2f}", delta=f"{pnl_tot:+.2f} €")
+    k2.metric("Profit", f"€{pnl_tot:.2f}")
+    k3.metric("ROI", f"{roi:.1f}%")
+    k4.metric("Yield", f"{yield_pct:.1f}%")
+    k5.metric("Win Rate", f"{wr:.0f}%")
+    k6.metric("Pending", pending_n)
+    k7, k8, k9 = st.columns(3)
+    k7.metric("Bets chiuse", len(chiuse))
+    k8.metric("Quota media", f"{avg_odds:.2f}" if avg_odds > 0 else "—")
+    k9.metric("Stake medio", f"€{avg_stake:.2f}" if avg_stake > 0 else "—")
+
     st.markdown("---")
 
-    if not chiuse.empty:
-        chiuse_s = chiuse.copy()
-        chiuse_s["Bankroll"] = st.session_state.bankroll_start + chiuse_s["P&L €"].cumsum()
-        fig_bk = go.Figure()
-        fig_bk.add_trace(go.Scatter(
-            x=list(range(1, len(chiuse_s) + 1)), y=chiuse_s["Bankroll"],
-            mode="lines+markers", line=dict(color="#00D4AA", width=2),
-            fill="tozeroy", fillcolor="rgba(0,212,170,0.08)", name="Bankroll"))
-        fig_bk.add_hline(y=st.session_state.bankroll_start, line_dash="dash",
-                         line_color="#8B949E", annotation_text="Bankroll iniziale")
-        fig_bk.update_layout(height=300, template="plotly_dark",
-                             xaxis_title="Scommessa #", yaxis_title="€")
-        st.plotly_chart(fig_bk, width="stretch")
+    c_left, c_right = st.columns([1.8, 1.2])
+    with c_left:
+        st.markdown("#### 📈 Equity Curve")
+        if not chiuse.empty:
+            chiuse_plot = chiuse.sort_values("Data_dt", ascending=True).copy()
+            chiuse_plot["Equity"] = float(st.session_state.bankroll_start) + chiuse_plot["P&L €"].cumsum()
+            fig_eq = go.Figure()
+            fig_eq.add_trace(go.Scatter(
+                x=chiuse_plot["Data_dt"], y=chiuse_plot["Equity"],
+                mode="lines+markers", name="Equity",
+                line=dict(color="#00D4AA", width=2.5),
+                fill="tozeroy", fillcolor="rgba(0,212,170,0.08)"
+            ))
+            fig_eq.add_hline(
+                y=float(st.session_state.bankroll_start),
+                line_dash="dash", line_color="#8B949E",
+                annotation_text="Start"
+            )
+            fig_eq.update_layout(
+                height=330, template="plotly_dark",
+                xaxis_title="Data", yaxis_title="€",
+                margin=dict(t=20, b=20, l=20, r=20)
+            )
+            st.plotly_chart(fig_eq, width="stretch")
+        else:
+            st.info("Nessuna scommessa chiusa nel filtro corrente.")
+
+    with c_right:
+        st.markdown("#### 🧩 Breakdown Mercato")
+        if not chiuse.empty:
+            by_stat = chiuse.groupby("Stat", dropna=False).agg(
+                Bets=("Stat", "count"),
+                Stake=("Stake €", "sum"),
+                Profit=("P&L €", "sum"),
+            ).reset_index()
+            by_stat["ROI %"] = by_stat.apply(
+                lambda r: (r["Profit"] / r["Stake"] * 100) if r["Stake"] else 0.0,
+                axis=1,
+            )
+            fig_stat = go.Figure(go.Bar(
+                x=by_stat["Stat"], y=by_stat["Profit"],
+                text=[f"€{v:.1f}" for v in by_stat["Profit"]],
+                textposition="outside",
+                marker_color=["#00D4AA" if v >= 0 else "#FF5252" for v in by_stat["Profit"]],
+            ))
+            fig_stat.update_layout(
+                height=330, template="plotly_dark",
+                yaxis_title="Profit €", margin=dict(t=20, b=20, l=20, r=20)
+            )
+            st.plotly_chart(fig_stat, width="stretch")
+        else:
+            st.info("Nessun breakdown disponibile.")
+
+    st.markdown("#### 🏦 Breakdown Bookmaker")
+    if not chiuse.empty and (chiuse["Bookmaker"].fillna("").str.strip() != "").any():
+        by_book = chiuse.copy()
+        by_book["Bookmaker"] = by_book["Bookmaker"].replace("", "N/A")
+        book_tbl = by_book.groupby("Bookmaker", dropna=False).agg(
+            Bets=("Bookmaker", "count"),
+            Stake=("Stake €", "sum"),
+            Profit=("P&L €", "sum"),
+            WinRate=("Risultato", lambda x: (x == "Vinto").mean() * 100),
+        ).reset_index().sort_values("Profit", ascending=False)
+        book_tbl["ROI %"] = book_tbl.apply(
+            lambda r: (r["Profit"] / r["Stake"] * 100) if r["Stake"] else 0.0,
+            axis=1,
+        )
+        st.dataframe(book_tbl, width="stretch", hide_index=True)
+    else:
+        st.caption("Nessun bookmaker compilato nelle scommesse chiuse.")
 
     # ── Editor scommesse pendenti ───────────────────────────────────────────
     pendenti_idx = [i for i, b in enumerate(st.session_state.bets)
                     if b.get("Risultato", "In attesa") == "In attesa"]
     if pendenti_idx:
-        with st.expander(f"✏️ Aggiorna risultato pendenti ({len(pendenti_idx)})", expanded=False):
+        with st.expander(f"✏️ Aggiorna pendenti ({len(pendenti_idx)})", expanded=False):
             for i in pendenti_idx:
                 b = st.session_state.bets[i]
-                cols = st.columns([3, 2, 2, 2])
+                cols = st.columns([3, 1.2, 1.2, 1.2])
                 cols[0].markdown(
                     f"**{b.get('Giocatore', '?')}** · {b.get('Stat', '')} {b.get('Tipo', '')} "
                     f"{b.get('Linea', '?')} @ {b.get('Quota', '?')} · stake €{b.get('Stake €', 0)} "
@@ -2495,13 +2605,17 @@ def bankroll_page():
                     _recompute_bet_pnl(b)
                     _save_bankroll_state()
                     st.rerun()
-                if cols[3].button("🗑️ Rimuovi", key=f"rem_{i}"):
+                if cols[3].button("🗑️", key=f"rem_{i}"):
                     st.session_state.bets.pop(i)
                     _save_bankroll_state()
                     st.rerun()
 
-    st.markdown("#### 📄 Storico")
-    st.dataframe(df_bets, width="stretch", hide_index=True)
+    st.markdown("#### 📄 Storico Scommesse")
+    show_cols = [
+        c for c in ["Data", "Giocatore", "Stat", "Tipo", "Linea", "Quota", "Stake €", "Risultato", "P&L €", "Bookmaker", "Note"]
+        if c in df_view.columns
+    ]
+    st.dataframe(df_view[show_cols], width="stretch", hide_index=True)
 
     col_del, col_exp, col_imp = st.columns([1, 2, 2])
     with col_del:
@@ -2510,21 +2624,25 @@ def bankroll_page():
             _save_bankroll_state()
             st.rerun()
     with col_exp:
-        st.download_button("⬇️ Esporta CSV Scommesse", data=df_to_csv(df_bets),
-                           file_name=f"bankroll_{datetime.date.today()}.csv",
-                           mime="text/csv")
+        st.download_button(
+            "⬇️ Esporta CSV",
+            data=df_to_csv(df_bets[[c for c in df_bets.columns if c != "Data_dt"]]),
+            file_name=f"bankroll_{datetime.date.today()}.csv",
+            mime="text/csv",
+        )
     with col_imp:
-        up = st.file_uploader("📤 Importa CSV (sostituisce o accoda)",
-                              type=["csv"], key="bk_import_full")
+        up = st.file_uploader("📤 Importa CSV (accoda/sostituisce)", type=["csv"], key="bk_import_full")
         if up is not None:
-            mode_imp = st.radio("Modalità import",
-                                ["Accoda allo storico", "Sostituisci storico"],
-                                horizontal=True, key="bk_import_mode")
+            mode_imp = st.radio(
+                "Modalità import",
+                ["Accoda allo storico", "Sostituisci storico"],
+                horizontal=True,
+                key="bk_import_mode",
+            )
             if st.button("Conferma import", key="bk_import_confirm"):
                 try:
                     df_in = pd.read_csv(up)
-                    required = {"Data", "Giocatore", "Stat", "Tipo", "Linea", "Quota",
-                                "Stake €", "Risultato"}
+                    required = {"Data", "Giocatore", "Stat", "Tipo", "Linea", "Quota", "Stake €", "Risultato"}
                     if not required.issubset(set(df_in.columns)):
                         st.error(f"Colonne mancanti. Servono: {sorted(required)}")
                     else:
