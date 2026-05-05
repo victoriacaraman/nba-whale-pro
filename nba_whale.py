@@ -1727,6 +1727,7 @@ def toolkit_pro_page(linee: dict, n_partite: int):
     st.subheader("🧰 Toolkit Tipster Pro")
     st.caption("Cruscotto visuale completo: medie, probabilità, trend, contesto e indicatori avanzati. "
                "Le tabelle numeriche grezze sono accessibili negli expander '📋 Vedi tabella raw'.")
+    linee = render_line_inputs(expanded=False)
     query = st.text_input("Giocatore Toolkit", value="Luka Doncic", key="toolkit_player")
     if not query:
         return
@@ -2511,6 +2512,7 @@ def bankroll_page():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def single_player_page(linee: dict, n_partite: int, n_slump: int):
+    linee = render_line_inputs(expanded=False)
     query = st.text_input("🔍 Cerca giocatore NBA",
                           value="Donovan Mitchell",
                           placeholder="Es: LeBron, Curry, Jokic, Giannis…",
@@ -2946,6 +2948,7 @@ def single_player_page(linee: dict, n_partite: int, n_slump: int):
 # ══════════════════════════════════════════════════════════════════════════════
 
 def comparison_page(linee: dict, n_partite: int, n_slump: int):
+    linee = render_line_inputs(expanded=False)
     cp1, cp2 = st.columns(2)
     q1 = cp1.text_input("Giocatore 1", value="LeBron James", key="cmp_p1",
                          placeholder="Es: LeBron, Curry…")
@@ -4396,6 +4399,33 @@ def _navigate_to(target_page: str):
     st.session_state["nav_page"] = target_page
 
 
+def render_line_inputs(expanded: bool = False) -> dict:
+    """Mostra in pagina i 3 input per Linea PTS / REB / AST e ritorna `linee`.
+
+    I valori sono persistenti tramite `st.session_state` (chiavi l_pts/l_reb/l_ast)
+    e quindi condivisi automaticamente fra tutte le pagine che chiamano questa helper.
+    """
+    st.session_state.setdefault("l_pts", 22.5)
+    st.session_state.setdefault("l_reb", 5.5)
+    st.session_state.setdefault("l_ast", 4.5)
+
+    with st.expander("⚙️ Linee Over/Under (modifica le linee del bookmaker)", expanded=expanded):
+        st.caption(
+            "Imposta qui le linee Over/Under del bookmaker. Tutti i calcoli (Hit Rate, "
+            "probabilità Poisson, Z-score, ecc.) usano questi valori."
+        )
+        c1, c2, c3 = st.columns(3)
+        c1.number_input("Punti",    step=0.5, key="l_pts")
+        c2.number_input("Rimbalzi", step=0.5, key="l_reb")
+        c3.number_input("Assist",   step=0.5, key="l_ast")
+
+    return {
+        "PTS": float(st.session_state["l_pts"]),
+        "REB": float(st.session_state["l_reb"]),
+        "AST": float(st.session_state["l_ast"]),
+    }
+
+
 def home_page():
     """Schermata principale: logo + grid di tutte le funzioni cliccabili."""
     if _ICON_192:
@@ -4588,11 +4618,14 @@ with st.sidebar:
     )
     st.markdown("---")
 
-    st.markdown("**⚙️ Linee Over/Under**")
-    linea_pts = st.number_input("Punti",    value=22.5, step=0.5, key="l_pts")
-    linea_reb = st.number_input("Rimbalzi", value=5.5,  step=0.5, key="l_reb")
-    linea_ast = st.number_input("Assist",   value=4.5,  step=0.5, key="l_ast")
-    linee = {"PTS": linea_pts, "REB": linea_reb, "AST": linea_ast}
+    st.session_state.setdefault("l_pts", 22.5)
+    st.session_state.setdefault("l_reb", 5.5)
+    st.session_state.setdefault("l_ast", 4.5)
+    linee = {
+        "PTS": float(st.session_state["l_pts"]),
+        "REB": float(st.session_state["l_reb"]),
+        "AST": float(st.session_state["l_ast"]),
+    }
 
     st.markdown("**📅 Finestre di analisi**")
     n_partite = st.slider("Ultime gare",    5, 20, 10, key="n_gare")
