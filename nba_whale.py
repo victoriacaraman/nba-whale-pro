@@ -1521,9 +1521,33 @@ def build_50_context_tools(
     return out
 
 
+def _tool_value(tools_df: pd.DataFrame, key: str, default: float = 0.0) -> float:
+    """Estrae un valore dal DataFrame dei tool (colonne '#' / 'Valore') in modo sicuro."""
+    try:
+        rows = tools_df.loc[tools_df["#"] == key, "Valore"]
+        if rows.empty:
+            return default
+        return float(rows.iloc[0])
+    except Exception:
+        return default
+
+
+def _streak_label(streak_over: int, streak_under: int, stat: str) -> str:
+    if streak_over > 0:
+        if streak_over >= 5: return f"🔥 {streak_over} {stat} Over di fila"
+        if streak_over >= 3: return f"📈 {streak_over} {stat} Over di fila"
+        return f"🟢 {streak_over} {stat} Over"
+    if streak_under > 0:
+        if streak_under >= 5: return f"❄️ {streak_under} {stat} Under di fila"
+        if streak_under >= 3: return f"📉 {streak_under} {stat} Under di fila"
+        return f"🔴 {streak_under} {stat} Under"
+    return f"➖ Nessuna serie {stat}"
+
+
 def toolkit_pro_page(linee: dict, n_partite: int):
     st.subheader("🧰 Toolkit Tipster Pro")
-    st.caption("Toolkit base (40) + toolkit contesto avanzato (50).")
+    st.caption("Cruscotto visuale completo: medie, probabilità, trend, contesto e indicatori avanzati. "
+               "Le tabelle numeriche grezze sono accessibili negli expander '📋 Vedi tabella raw'.")
     query = st.text_input("Giocatore Toolkit", value="Luka Doncic", key="toolkit_player")
     if not query:
         return
@@ -1541,17 +1565,134 @@ def toolkit_pro_page(linee: dict, n_partite: int):
 
     n_eff = len(df_all) if st.session_state.get("use_all_games", False) else n_partite
     df_r = df_all.head(max(1, n_eff)).copy()
-    t_base, t_ctx, t_adv = st.tabs(["Toolkit Base (40)", "Toolkit Contesto (50)", "Toolkit Avanzato (20)"])
+
+    t_base, t_ctx, t_adv = st.tabs([
+        "📊 Stat & Probabilità",
+        "🧠 Contesto & Value Bet",
+        "🚀 Indicatori Avanzati",
+    ])
+
+    # ── TAB 1: Toolkit Base — visuale ────────────────────────────────────
     with t_base:
         tools_df = build_40_tools(name, df_all, df_r, linee)
-        st.dataframe(tools_df, width="stretch", hide_index=True)
+        v = _tool_value  # alias
+
+        # Sezione: 6 KPI riassuntivi in alto
+        k1, k2, k3, k4, k5, k6 = st.columns(6)
+        k1.metric("Media PTS 5G", f"{v(tools_df, '1'):.1f}")
+        k2.metric("Media PTS Stag.", f"{v(tools_df, '3'):.1f}")
+        k3.metric("Hit Rate PTS", f"{v(tools_df, '10'):.0f}%")
+        k4.metric("Prob Poisson PTS", f"{v(tools_df, '13'):.0f}%")
+        k5.metric("Trend PTS (3G-10G)", f"{v(tools_df, '16'):+.2f}")
+        k6.metric("Confidenza", f"{v(tools_df, '40'):.0f}/100")
+
+        st.markdown("---")
+        st.markdown("##### 📊 Medie a confronto · Ultime 5G · Ultime 10G · Stagione")
+        fig_avg = go.Figure()
+        for label, color, keys in [
+            ("Ultime 5G",  "#00D4AA", ["1", "4", "7"]),
+            ("Ultime 10G", "#3B9EFF", ["2", "5", "8"]),
+            ("Stagione",   "#FFD600", ["3", "6", "9"]),
+        ]:
+            ys = [v(tools_df, k) for k in keys]
+            fig_avg.add_trace(go.Bar(
+                name=label, x=["Punti", "Rimbalzi", "Assist"], y=ys,
+                marker_color=color,
+                text=[f"{y:.1f}" for y in ys], textposition="outside",
+            ))
+        fig_avg.update_layout(barmode="group", height=320, template="plotly_dark",
+                              legend=dict(orientation="h", y=1.12),
+                              margin=dict(t=40, b=20, l=20, r=20))
+        st.plotly_chart(fig_avg, width="stretch")
+
+        st.markdown("##### 🎯 Probabilità Over · Modello (Poisson) vs Storico (Hit Rate)")
+        st.caption("Se entrambe le barre per una stat sono > 50% → segnale forte Over. "
+                   "Se sono molto diverse, il modello sta vedendo qualcosa di nuovo.")
+        fig_prob = go.Figure()
+        poisson_ys = [v(tools_df, "13"), v(tools_df, "14"), v(tools_df, "15")]
+        hit_ys     = [v(tools_df, "10"), v(tools_df, "11"), v(tools_df, "12")]
+        fig_prob.add_trace(go.Bar(
+            name="Modello Poisson", x=["Punti", "Rimbalzi", "Assist"], y=poisson_ys,
+            marker_color="#00D4AA",
+            text=[f"{y:.0f}%" for y in poisson_ys], textposition="outside",
+        ))
+        fig_prob.add_trace(go.Bar(
+            name="Hit Rate storico", x=["Punti", "Rimbalzi", "Assist"], y=hit_ys,
+            marker_color="#FF9F40",
+            text=[f"{y:.0f}%" for y in hit_ys], textposition="outside",
+        ))
+        fig_prob.add_hline(y=50, line_dash="dash", line_color="white",
+                           annotation_text="50% (testa o croce)", annotation_position="top right")
+        fig_prob.update_layout(barmode="group", height=340, template="plotly_dark",
+                               yaxis_title="Probabilità Over %", yaxis_range=[0, 110],
+                               legend=dict(orientation="h", y=1.12),
+                               margin=dict(t=40, b=20, l=20, r=20))
+        st.plotly_chart(fig_prob, width="stretch")
+
+        st.markdown("##### 📈 Trend recente (ultime 3G vs 10G)")
+        st.caption("Verde = in salita · Rosso = in calo. Misura il momentum di breve termine.")
+        trend_vals = [v(tools_df, "16"), v(tools_df, "17"), v(tools_df, "18")]
+        trend_colors = ["#00D4AA" if x >= 0 else "#FF5252" for x in trend_vals]
+        fig_t = go.Figure(go.Bar(
+            x=["Punti", "Rimbalzi", "Assist"], y=trend_vals,
+            marker_color=trend_colors,
+            text=[f"{x:+.2f}" for x in trend_vals], textposition="outside",
+        ))
+        fig_t.add_hline(y=0, line_color="white", line_width=1)
+        fig_t.update_layout(height=280, template="plotly_dark", showlegend=False,
+                            margin=dict(t=20, b=20, l=20, r=20))
+        st.plotly_chart(fig_t, width="stretch")
+
+        st.markdown("##### 🏠 Casa vs ✈️ Trasferta · Media Punti")
+        h_pts = v(tools_df, "37")
+        a_pts = v(tools_df, "38")
+        fig_ha = go.Figure(go.Bar(
+            x=["🏠 Casa", "✈️ Trasferta"], y=[h_pts, a_pts],
+            marker_color=["#00D4AA", "#FF9F40"],
+            text=[f"{h_pts:.1f}", f"{a_pts:.1f}"], textposition="outside",
+        ))
+        fig_ha.update_layout(height=240, template="plotly_dark", showlegend=False,
+                             margin=dict(t=20, b=20, l=20, r=20))
+        st.plotly_chart(fig_ha, width="stretch")
+
+        st.markdown("##### 🔥 Streak attuali (consecutive partite Over/Under)")
+        sg1, sg2, sg3 = st.columns(3)
+        sg1.metric("PUNTI",     _streak_label(int(v(tools_df,"31")), int(v(tools_df,"32")), "PTS"))
+        sg2.metric("RIMBALZI",  _streak_label(int(v(tools_df,"33")), int(v(tools_df,"34")), "REB"))
+        sg3.metric("ASSIST",    _streak_label(int(v(tools_df,"35")), int(v(tools_df,"36")), "AST"))
+
+        st.markdown("##### 🎚️ Volatilità & Z-Score (Punti)")
+        cv_pts = v(tools_df, "22")
+        conf   = v(tools_df, "40")
+        z      = v(tools_df, "39")
+        cv1, cv2, cv3 = st.columns(3)
+        cv1.metric("Confidenza", f"{conf:.0f}/100",
+                   help="Inverso della volatilità. ≥75 stabilissimo · 50-75 buono · <50 imprevedibile.")
+        cv2.metric("CV (volatilità)", f"{cv_pts:.2f}",
+                   help="Coefficient of Variation. <0.25 stabile · 0.25-0.40 medio · >0.40 ballerino.")
+        cv3.metric("Z-Score linea", f"{z:+.2f}",
+                   help="Distanza standardizzata della linea dalla media. <0 = linea sotto la media (favorisce Over).")
+
         score_core = (
-            float(tools_df.loc[tools_df["#"] == "13", "Valore"].iloc[0]) * 0.25
-            + float(tools_df.loc[tools_df["#"] == "10", "Valore"].iloc[0]) * 0.25
-            + max(0.0, float(tools_df.loc[tools_df["#"] == "40", "Valore"].iloc[0])) * 0.25
-            + max(0.0, min(100.0, 50 + float(tools_df.loc[tools_df["#"] == "16", "Valore"].iloc[0]) * 5)) * 0.25
+            v(tools_df, "13") * 0.25
+            + v(tools_df, "10") * 0.25
+            + max(0.0, v(tools_df, "40")) * 0.25
+            + max(0.0, min(100.0, 50 + v(tools_df, "16") * 5)) * 0.25
         )
-        st.metric("Indice Pro Complessivo", f"{score_core:.1f}/100")
+        st.markdown("---")
+        st.markdown(f"#### 💎 Indice Pro Complessivo · **{score_core:.1f}/100**")
+        if score_core >= 65:
+            st.success("🚀 **Segnale forte favorevole all'Over PTS** · Tutti gli indicatori convergono.")
+        elif score_core >= 50:
+            st.info("⚖️ **Segnale moderato** · Alcuni indicatori positivi, valuta la quota.")
+        elif score_core >= 35:
+            st.warning("⚠️ **Segnale debole** · Indicatori contrastanti, meglio cautela.")
+        else:
+            st.error("❌ **Segnale contrario all'Over** · Forma e probabilità sotto soglia.")
+
+        with st.expander("📋 Vedi tabella numerica completa (40 indicatori)"):
+            st.dataframe(tools_df, width="stretch", hide_index=True)
+
         st.download_button(
             "⬇️ Esporta Toolkit Base (CSV)",
             data=df_to_csv(tools_df),
@@ -1559,8 +1700,11 @@ def toolkit_pro_page(linee: dict, n_partite: int):
             mime="text/csv",
         )
 
+    # ── TAB 2: Contesto & Value Bet ──────────────────────────────────────
     with t_ctx:
-        st.markdown("#### Input contesto partita")
+        st.markdown("##### 🩹 Input contesto partita")
+        st.caption("Inserisci assenze e fattori della partita (o lascia auto-detect dai team in sidebar). "
+                   "Il modello applica un aggiustamento euristico alle probabilità.")
         auto_inj = st.checkbox("Auto-import injury report (beta)", value=True, key="auto_inj_beta")
         auto_summary = {}
         if auto_inj:
@@ -1580,52 +1724,37 @@ def toolkit_pro_page(linee: dict, n_partite: int):
                     "team_notes": auto_tm["notes"],
                     "opp_notes": auto_opp["notes"],
                 }
-                st.caption("Injury auto-detected da team selezionati in sidebar.")
                 with st.expander("Dettaglio injury auto (beta)"):
-                    st.write("Team selezionato:")
+                    st.write("**Team selezionato:**")
                     for note in auto_summary["team_notes"][:6]:
                         st.write(f"- {note}")
-                    st.write("Avversario selezionato:")
+                    st.write("**Avversario selezionato:**")
                     for note in auto_summary["opp_notes"][:6]:
                         st.write(f"- {note}")
             else:
                 st.caption("Per auto-injury, seleziona Team 1 e Team 2 in sidebar.")
 
         c1, c2, c3 = st.columns(3)
-        teammate_out_count = c1.number_input(
-            "Compagni OUT",
-            min_value=0, max_value=12,
-            value=int(auto_summary.get("teammate_out_count", 1)),
-            step=1
-        )
-        opp_out_count = c2.number_input(
-            "Avversari OUT",
-            min_value=0, max_value=12,
-            value=int(auto_summary.get("opp_out_count", 1)),
-            step=1
-        )
-        b2b_flag = c3.checkbox("Back-to-back", value=False)
+        teammate_out_count = c1.number_input("Compagni OUT", min_value=0, max_value=12,
+            value=int(auto_summary.get("teammate_out_count", 1)), step=1)
+        opp_out_count = c2.number_input("Avversari OUT", min_value=0, max_value=12,
+            value=int(auto_summary.get("opp_out_count", 1)), step=1)
+        b2b_flag = c3.checkbox("Back-to-back", value=False,
+                               help="Seconda partita consecutiva: spesso minore rendimento.")
         c4, c5, c6 = st.columns(3)
-        teammate_usage_loss = c4.slider(
-            "Usage perso compagni %",
-            0, 60, int(round(auto_summary.get("teammate_usage_loss", 12)))
-        )
-        opp_def_weakness = c5.slider(
-            "Debolezza difesa avv. %",
-            0, 60, int(round(auto_summary.get("opp_def_weakness", 10)))
-        )
-        expected_min_delta = c6.slider(
-            "Delta minuti atteso",
-            -8, 12, int(round(auto_summary.get("expected_min_delta", 2)))
-        )
+        teammate_usage_loss = c4.slider("Usage perso compagni %", 0, 60,
+            int(round(auto_summary.get("teammate_usage_loss", 12))),
+            help="Quanto usage liberano i compagni assenti (più è alto più il giocatore aumenta tiri/passaggi).")
+        opp_def_weakness = c5.slider("Debolezza difesa avversaria %", 0, 60,
+            int(round(auto_summary.get("opp_def_weakness", 10))),
+            help="Quanto è debole la difesa avversaria considerando le loro assenze.")
+        expected_min_delta = c6.slider("Delta minuti atteso", -8, 12,
+            int(round(auto_summary.get("expected_min_delta", 2))),
+            help="Minuti in più o meno rispetto alla sua media.")
         market_odds = st.number_input("Quota mercato (es. 1.90)", min_value=1.01, value=1.90, step=0.01)
-        st.caption("Inserisci assenze/contesto manualmente: il modello applica adjustment euristico.")
 
         ctx_df = build_50_context_tools(
-            name=name,
-            df_all=df_all,
-            df_r=df_r,
-            linee=linee,
+            name=name, df_all=df_all, df_r=df_r, linee=linee,
             teammate_out_count=int(teammate_out_count),
             opp_out_count=int(opp_out_count),
             teammate_usage_loss=float(teammate_usage_loss),
@@ -1633,20 +1762,49 @@ def toolkit_pro_page(linee: dict, n_partite: int):
             expected_min_delta=float(expected_min_delta),
             b2b_flag=bool(b2b_flag),
         )
-        st.dataframe(ctx_df, width="stretch", hide_index=True)
 
-        prob_adj_pts = float(ctx_df.loc[ctx_df["#"] == "22", "Valore"].iloc[0])
+        # Probabilità prima/dopo aggiustamento contesto (PTS)
+        prob_base_pts = _tool_value(build_40_tools(name, df_all, df_r, linee), "13")
+        prob_adj_pts  = _tool_value(ctx_df, "22")
+        delta_pts = prob_adj_pts - prob_base_pts
+
+        st.markdown("---")
+        st.markdown("##### 🔄 Impatto del contesto sulla probabilità Over PUNTI")
+        fig_ctx = go.Figure(go.Bar(
+            x=["Probabilità base", "Dopo contesto"],
+            y=[prob_base_pts, prob_adj_pts],
+            marker_color=["#3B9EFF", "#00D4AA" if delta_pts >= 0 else "#FF5252"],
+            text=[f"{prob_base_pts:.1f}%", f"{prob_adj_pts:.1f}% ({delta_pts:+.1f}pp)"],
+            textposition="outside",
+        ))
+        fig_ctx.add_hline(y=50, line_dash="dash", line_color="white",
+                          annotation_text="50%", annotation_position="top right")
+        fig_ctx.update_layout(height=320, template="plotly_dark", showlegend=False,
+                              yaxis_title="Probabilità %", yaxis_range=[0, 110],
+                              margin=dict(t=20, b=20, l=20, r=20))
+        st.plotly_chart(fig_ctx, width="stretch")
+
+        # Verdetto value bet
         implied_prob = 100 / market_odds if market_odds > 1 else 0.0
         edge = prob_adj_pts - implied_prob
         fair_odds = 100 / max(prob_adj_pts, 0.1)
+
+        ev_c1, ev_c2, ev_c3 = st.columns(3)
+        ev_c1.metric("Prob. Modello (PTS)", f"{prob_adj_pts:.1f}%")
+        ev_c2.metric("Prob. implicita quota", f"{implied_prob:.1f}%")
+        ev_c3.metric("Edge", f"{edge:+.1f}pp", delta=f"fair ~{fair_odds:.2f}")
+
         if edge >= 7:
-            st.success(f"🟢 VALUE BET FORTE (PTS): edge +{edge:.1f}pp · fair odds ~ {fair_odds:.2f}")
+            st.success(f"🟢 **VALUE BET FORTE (PTS)** · edge +{edge:.1f}pp · fair odds ~ {fair_odds:.2f}")
         elif edge >= 3:
-            st.info(f"🔵 VALUE BET MODERATA (PTS): edge +{edge:.1f}pp · fair odds ~ {fair_odds:.2f}")
+            st.info(f"🔵 **VALUE BET MODERATA (PTS)** · edge +{edge:.1f}pp · fair odds ~ {fair_odds:.2f}")
         elif edge <= -7:
-            st.error(f"🔴 NO BET (PTS): edge {edge:.1f}pp · quota non favorevole")
+            st.error(f"🔴 **NO BET (PTS)** · edge {edge:.1f}pp · quota troppo bassa")
         else:
-            st.warning(f"🟡 EDGE LIMITATA (PTS): edge {edge:.1f}pp")
+            st.warning(f"🟡 **EDGE LIMITATA (PTS)** · edge {edge:+.1f}pp")
+
+        with st.expander("📋 Vedi tabella numerica completa (50 indicatori contesto)"):
+            st.dataframe(ctx_df, width="stretch", hide_index=True)
 
         st.download_button(
             "⬇️ Esporta Toolkit Contesto (50) CSV",
@@ -1655,9 +1813,86 @@ def toolkit_pro_page(linee: dict, n_partite: int):
             mime="text/csv",
         )
 
+    # ── TAB 3: Indicatori Avanzati ───────────────────────────────────────
     with t_adv:
         adv_df = build_advanced_20_tools(df_all, df_r, linee)
-        st.dataframe(adv_df, width="stretch", hide_index=True)
+        v_adv = _tool_value
+
+        # Hero: 3 indici Over (PTS/REB/AST) come metric grandi
+        st.markdown("##### 🎯 Indici Over consolidati (Poisson + Hit Rate combinati)")
+        ic1, ic2, ic3 = st.columns(3)
+        idx_pts = v_adv(adv_df, "A17")
+        idx_reb = v_adv(adv_df, "A18")
+        idx_ast = v_adv(adv_df, "A19")
+
+        def _signal(val):
+            if val >= 65: return "🟢 Forte"
+            if val >= 50: return "🔵 Moderato"
+            if val >= 35: return "🟡 Debole"
+            return "🔴 Contrario"
+
+        ic1.metric("PUNTI",    f"{idx_pts:.0f}/100", delta=_signal(idx_pts))
+        ic2.metric("RIMBALZI", f"{idx_reb:.0f}/100", delta=_signal(idx_reb))
+        ic3.metric("ASSIST",   f"{idx_ast:.0f}/100", delta=_signal(idx_ast))
+
+        st.markdown("---")
+        st.markdown("##### 📊 Combo statistiche multiple (PRA / PA / PR)")
+        st.caption("PRA = Punti+Rimbalzi+Assist (mercato comune). PA = Punti+Assist. PR = Punti+Rimbalzi.")
+        combo_vals = [v_adv(adv_df, "A1"), v_adv(adv_df, "A2"), v_adv(adv_df, "A3")]
+        fig_combo = go.Figure(go.Bar(
+            x=["PRA", "PA", "PR"], y=combo_vals,
+            marker_color=["#00D4AA", "#3B9EFF", "#FF9F40"],
+            text=[f"{v:.1f}" for v in combo_vals], textposition="outside",
+        ))
+        fig_combo.update_layout(height=280, template="plotly_dark", showlegend=False,
+                                margin=dict(t=20, b=20, l=20, r=20))
+        st.plotly_chart(fig_combo, width="stretch")
+
+        st.markdown("##### 📈 Trend slope · correlazione di tendenza ultime 10G")
+        st.caption("Scala da -1 (in netto calo) a +1 (in netto salita). Misura se la curva di performance sta puntando in alto o in basso.")
+        slope_vals = [v_adv(adv_df, "A5"), v_adv(adv_df, "A6"), v_adv(adv_df, "A7")]
+        slope_colors = ["#00D4AA" if x >= 0 else "#FF5252" for x in slope_vals]
+        fig_slope = go.Figure(go.Bar(
+            x=["Punti", "Rimbalzi", "Assist"], y=slope_vals,
+            marker_color=slope_colors,
+            text=[f"{v:+.2f}" for v in slope_vals], textposition="outside",
+        ))
+        fig_slope.add_hline(y=0, line_color="white", line_width=1)
+        fig_slope.update_layout(height=280, template="plotly_dark", showlegend=False,
+                                yaxis_range=[-1.1, 1.1],
+                                margin=dict(t=20, b=20, l=20, r=20))
+        st.plotly_chart(fig_slope, width="stretch")
+
+        st.markdown("##### 🚀 Distribuzione % delle partite (Punti)")
+        st.caption("Quanto spesso il giocatore esplode (sopra media+1σ) o crolla (sotto media-1σ).")
+        dist_vals = [v_adv(adv_df, "A12"), v_adv(adv_df, "A13"), v_adv(adv_df, "A14"),
+                     v_adv(adv_df, "A11")]
+        dist_labels = ["Sopra la media", "Esplosive (>μ+σ)", "Bust (<μ-σ)", "Over linea (10G)"]
+        dist_colors = ["#3B9EFF", "#00D4AA", "#FF5252", "#FFD600"]
+        fig_d = go.Figure(go.Bar(
+            x=dist_labels, y=dist_vals,
+            marker_color=dist_colors,
+            text=[f"{v:.0f}%" for v in dist_vals], textposition="outside",
+        ))
+        fig_d.add_hline(y=50, line_dash="dash", line_color="white",
+                        annotation_text="50%", annotation_position="top right")
+        fig_d.update_layout(height=320, template="plotly_dark", showlegend=False,
+                            yaxis_title="% partite", yaxis_range=[0, 110],
+                            margin=dict(t=20, b=20, l=20, r=20))
+        st.plotly_chart(fig_d, width="stretch")
+
+        st.markdown("##### 💎 Synergy & Ritmo")
+        sy1, sy2, sy3 = st.columns(3)
+        sy1.metric("Synergy Score", f"{v_adv(adv_df, 'A20'):.0f}/100",
+                   help="Stabilità combinata di PRA. Alto = performance prevedibile su tutte le 3 stat.")
+        sy2.metric("Pts per minuto", f"{v_adv(adv_df, 'A4'):.3f}",
+                   help="Efficienza realizzativa. Sopra 0.7 = top scorer.")
+        sy3.metric("Recent vs Stagione (PTS)", f"{v_adv(adv_df, 'A15'):+.1f}",
+                   help="Differenza media ultime 5G vs stagione. Positivo = in forma.")
+
+        with st.expander("📋 Vedi tabella numerica completa (20 indicatori avanzati)"):
+            st.dataframe(adv_df, width="stretch", hide_index=True)
+
         st.download_button(
             "⬇️ Esporta Toolkit Avanzato (20) CSV",
             data=df_to_csv(adv_df),
