@@ -558,12 +558,49 @@ def _phase_matches(phase_selected: str, phase_value: str) -> bool:
     return phase_value == phase_selected
 
 
+# Whitelist ufficiale 30 franchigie NBA (codici 3 lettere) per filtrare l'API
+NBA_TEAM_CODES = {
+    "ATL", "BOS", "BKN", "CHA", "CHI", "CLE", "DAL", "DEN", "DET", "GSW",
+    "HOU", "IND", "LAC", "LAL", "MEM", "MIA", "MIL", "MIN", "NOP", "NYK",
+    "OKC", "ORL", "PHI", "PHX", "POR", "SAC", "SAS", "TOR", "UTA", "WAS",
+}
+NBA_TEAM_NAMES = {
+    "atlanta hawks", "boston celtics", "brooklyn nets", "charlotte hornets",
+    "chicago bulls", "cleveland cavaliers", "dallas mavericks", "denver nuggets",
+    "detroit pistons", "golden state warriors", "houston rockets", "indiana pacers",
+    "la clippers", "los angeles clippers", "los angeles lakers", "memphis grizzlies",
+    "miami heat", "milwaukee bucks", "minnesota timberwolves", "new orleans pelicans",
+    "new york knicks", "oklahoma city thunder", "orlando magic", "philadelphia 76ers",
+    "phoenix suns", "portland trail blazers", "sacramento kings", "san antonio spurs",
+    "toronto raptors", "utah jazz", "washington wizards",
+}
+
+
+def _is_nba_team(name: str, code: str = "", raw: dict | None = None) -> bool:
+    """Vero solo per le 30 franchigie NBA. Filtra G-League, All-Star, internazionali."""
+    code_norm = (code or "").upper().strip()
+    name_norm = (name or "").lower().strip()
+    if code_norm in NBA_TEAM_CODES:
+        # Esclude squadre All-Star che a volte condividono codici brevi
+        if raw and (raw.get("allStar") or raw.get("nbaFranchise") is False):
+            return False
+        return True
+    if name_norm in NBA_TEAM_NAMES:
+        return True
+    # Se l'API espone esplicitamente nbaFranchise=True, accettiamo
+    if raw and raw.get("nbaFranchise") is True and not raw.get("allStar"):
+        return True
+    return False
+
+
 @st.cache_data(ttl=21600)
 def fetch_teams(season: str):
     teams_map = {}
 
-    def _add_team(tid, name, code):
+    def _add_team(tid, name, code, raw=None):
         if not tid or not name:
+            return
+        if not _is_nba_team(str(name), str(code or ""), raw):
             return
         label = f"{name} ({code})" if code else str(name)
         teams_map[int(tid)] = {"id": int(tid), "name": str(name), "label": label}
@@ -572,29 +609,29 @@ def fetch_teams(season: str):
     try:
         r = _api_get("/teams", {"season": season})
         for t in r.json().get("response", []):
-            _add_team(t.get("id"), t.get("name"), t.get("code") or "")
+            _add_team(t.get("id"), t.get("name"), t.get("code") or "", raw=t)
     except Exception:
         pass
 
     # Tentativo 2: endpoint teams senza season (alcuni piani/API lo richiedono)
-    if len(teams_map) < 2:
+    if len(teams_map) < 30:
         try:
             r = _api_get("/teams", {})
             for t in r.json().get("response", []):
-                _add_team(t.get("id"), t.get("name"), t.get("code") or "")
+                _add_team(t.get("id"), t.get("name"), t.get("code") or "", raw=t)
         except Exception:
             pass
 
     # Tentativo 3 (fallback forte): ricava team da games della season
-    if len(teams_map) < 2:
+    if len(teams_map) < 30:
         try:
             r = _api_get("/games", {"season": season})
             for g in r.json().get("response", []):
                 tm = g.get("teams", {}) or {}
                 home = tm.get("home", {}) or {}
                 vis = tm.get("visitors", {}) or {}
-                _add_team(home.get("id"), home.get("name") or home.get("nickname"), home.get("code") or "")
-                _add_team(vis.get("id"), vis.get("name") or vis.get("nickname"), vis.get("code") or "")
+                _add_team(home.get("id"), home.get("name") or home.get("nickname"), home.get("code") or "", raw=home)
+                _add_team(vis.get("id"), vis.get("name") or vis.get("nickname"), vis.get("code") or "", raw=vis)
         except Exception:
             pass
 
