@@ -3764,6 +3764,104 @@ def tipster_dashboard_page():
 #  ABOUT PAGE
 # ══════════════════════════════════════════════════════════════════════════════
 
+def home_page():
+    """Schermata principale: logo + grid di tutte le funzioni cliccabili."""
+    if _ICON_192:
+        icon_html = (
+            f'<img src="data:image/png;base64,{_ICON_192}" '
+            f'style="width:130px;height:130px;border-radius:28px;'
+            f'box-shadow:0 8px 30px rgba(0,212,170,0.35);" />'
+        )
+    else:
+        icon_html = '<span style="font-size:6rem;">🐋</span>'
+
+    st.markdown(
+        f"""
+<div style="text-align:center;padding:24px 0 18px;">
+    {icon_html}
+    <h1 style="color:#00D4AA;margin:18px 0 4px 0;font-size:2.6rem;letter-spacing:0.5px;">
+        NBA Whale Pro
+    </h1>
+    <p style="color:#E6EDF3;font-size:1.05rem;margin:0;">
+        Analisi statistica NBA · Tipster intelligence
+    </p>
+    <p style="color:#8B949E;font-size:0.85rem;margin:4px 0 0 0;">
+        v{VERSION} · Stagione 20{SEASON}-20{int(SEASON)+1} · Dati api-sports.io
+    </p>
+</div>
+""",
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("### 🚀 Tutte le funzioni")
+    st.caption("Clicca una card per aprire la sezione. Le impostazioni (linee, finestre, "
+               "squadre) restano sempre nella **sidebar** a sinistra.")
+
+    cards = [
+        ("📊", "Analisi Singolo",
+         "Studia un giocatore: stat, hit rate, trend per opponent, partite anomale.",
+         "📊 Analisi Singolo"),
+        ("⚔️", "Confronto Giocatori",
+         "Confronta due giocatori metrica per metrica con verdetto vincitore.",
+         "⚔️ Confronto"),
+        ("🏀", "Confronto Squadre",
+         "Compara due squadre: PF/PA, trend, attacco/difesa nei testa a testa.",
+         "🏀 Squadre"),
+        ("🚨", "Alert Value Giornata",
+         "Scanner value-bet OVER con linee/quote reali da The Odds API + Telegram.",
+         "🚨 Alert Value"),
+        ("🧰", "Toolkit Pro",
+         "100+ tool tipster: averages, hit rate, momentum, contesto e injury.",
+         "🧰 Toolkit Pro"),
+        ("📈", "Dashboard Tipster",
+         "KPI globali e per periodo: ROI, win rate, P&L, drawdown.",
+         "📈 Tipster Pro"),
+        ("💰", "Bankroll Tracker",
+         "Registra scommesse, monitora P&L, import/export CSV con persistenza.",
+         "💰 Bankroll"),
+        ("🩺", "Salute Dati",
+         "Diagnostica API, validatore roster, gestione cache e bot Telegram.",
+         "🩺 Salute Dati"),
+        ("ℹ️", "Guida",
+         "Documentazione, legenda acronimi e best practice di betting.",
+         "ℹ️ Guida"),
+    ]
+
+    cols_per_row = 3
+    for i in range(0, len(cards), cols_per_row):
+        chunk = cards[i:i + cols_per_row]
+        cols = st.columns(cols_per_row)
+        for col, (emoji, title, desc, target_page) in zip(cols, chunk):
+            with col:
+                st.markdown(
+                    f"""
+<div style="background:#161B22;border:1px solid #30363D;border-radius:12px;
+            padding:18px 16px 14px 16px;margin-bottom:10px;height:170px;
+            display:flex;flex-direction:column;justify-content:flex-start;">
+    <div style="font-size:2.2rem;line-height:1;margin-bottom:8px;">{emoji}</div>
+    <div style="font-weight:600;color:#E6EDF3;font-size:1.02rem;margin-bottom:6px;">{title}</div>
+    <div style="color:#8B949E;font-size:0.82rem;line-height:1.35;">{desc}</div>
+</div>
+""",
+                    unsafe_allow_html=True,
+                )
+                if st.button(f"Apri →", key=f"home_btn_{target_page}", width="stretch"):
+                    st.session_state["nav_page"] = target_page
+                    st.rerun()
+
+    st.markdown("---")
+    # Stato configurazione veloce
+    _tk, _ch = _get_telegram_creds()
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("API NBA",  "🟢 OK" if API_KEY else "🔴 Mancante")
+    s2.metric("Odds API", "🟢 OK" if ODDS_API_KEY else "🔴 Off")
+    s3.metric("Telegram", "🟢 OK" if (_tk and _ch) else "⚪ Off")
+    bets_n = len(st.session_state.get("bets", []))
+    s4.metric("Scommesse registrate", bets_n)
+    st.caption("⚠️ NBA Whale Pro è uno strumento di analisi statistica. "
+               "Non costituisce consulenza finanziaria. Gioca responsabilmente.")
+
+
 def about_page():
     st.subheader("ℹ️ NBA Whale Pro — Guida & Metodologia")
     st.markdown(f"""
@@ -3834,8 +3932,14 @@ with st.sidebar:
         '</div>', unsafe_allow_html=True)
     st.markdown("---")
 
+    if "nav_page" not in st.session_state:
+        st.session_state["nav_page"] = "🏠 Home"
+
     pagina = st.radio("Navigazione",
-                      ["📊 Analisi Singolo","⚔️ Confronto","🏀 Squadre","🚨 Alert Value","🧰 Toolkit Pro","📈 Tipster Pro","🩺 Salute Dati","💰 Bankroll","ℹ️ Guida"],
+                      ["🏠 Home", "📊 Analisi Singolo", "⚔️ Confronto", "🏀 Squadre",
+                       "🚨 Alert Value", "🧰 Toolkit Pro", "📈 Tipster Pro",
+                       "🩺 Salute Dati", "💰 Bankroll", "ℹ️ Guida"],
+                      key="nav_page",
                       label_visibility="collapsed")
     st.markdown("---")
 
@@ -3890,12 +3994,14 @@ with st.sidebar:
                 st.write(f"ID {pid}: {', '.join(names)}")
     st.caption("⚠️ Non è consulenza finanziaria.")
 
-if not API_KEY and pagina != "ℹ️ Guida":
+if not API_KEY and pagina not in ("🏠 Home", "ℹ️ Guida"):
     st.error("⚠️ Chiave api-sports.io non configurata. "
-             "Imposta la variabile d'ambiente **API_SPORTS_KEY**.")
+             "Imposta la variabile d'ambiente **API_SPORTS_KEY** "
+             "(o aggiungi il segreto in Streamlit Cloud → Settings → Secrets).")
     st.stop()
 
-if   pagina == "📊 Analisi Singolo": single_player_page(linee, n_partite, n_slump)
+if   pagina == "🏠 Home":            home_page()
+elif pagina == "📊 Analisi Singolo": single_player_page(linee, n_partite, n_slump)
 elif pagina == "⚔️ Confronto":       comparison_page(linee, n_partite, n_slump)
 elif pagina == "🏀 Squadre":         teams_comparison_page(n_partite)
 elif pagina == "🚨 Alert Value":     value_alerts_page(linee, n_partite)
