@@ -57,7 +57,8 @@ _PWA_ICON_512_URL = os.environ.get(
     "PWA_ICON_512_URL",
     "https://raw.githubusercontent.com/victoriacaraman/nba-whale-pro/main/icon-512.png",
 ).strip()
-_PWA_CACHE_TAG = f"v={VERSION}"
+# VERSION è definita più avanti: qui usiamo un cache tag statico sicuro
+_PWA_CACHE_TAG = "v=1"
 
 if _PWA_ICON_192_URL and _PWA_ICON_512_URL:
     _manifest_icons = (
