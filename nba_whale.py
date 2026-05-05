@@ -2424,12 +2424,30 @@ def bankroll_page():
         stat_bet = b2.selectbox("Mercato", ["Punti", "Rimbalzi", "Assist"])
         esito = b3.selectbox("Direzione", ["Over", "Under"])
         if formato == "Multipla":
-            dettagli_multipla = st.text_area(
-                "Dettagli multipla (una selezione per riga)",
-                placeholder="Es:\nMitchell OVER 4.5 REB\nHachimura OVER 12.5 PTS",
-                height=90,
+            n_legs = int(st.number_input("Numero selezioni", min_value=2, max_value=10, value=2, step=1))
+            st.caption("Compila le selezioni della schedina:")
+            legs = []
+            market_short = {"Punti": "PTS", "Rimbalzi": "REB", "Assist": "AST"}
+            for i in range(n_legs):
+                l1, l2, l3, l4 = st.columns([2.2, 1.3, 1.1, 1.2])
+                lg_player = l1.text_input(f"Giocatore #{i+1}", key=f"mul_player_{i}")
+                lg_market = l2.selectbox(f"Mercato #{i+1}", ["Punti", "Rimbalzi", "Assist"], key=f"mul_market_{i}")
+                lg_side = l3.selectbox(f"Tipo #{i+1}", ["Over", "Under"], key=f"mul_side_{i}")
+                lg_line = l4.number_input(f"Linea #{i+1}", value=10.5, step=0.5, key=f"mul_line_{i}")
+                if str(lg_player).strip():
+                    legs.append({
+                        "player": str(lg_player).strip(),
+                        "market": lg_market,
+                        "side": lg_side,
+                        "line": float(lg_line),
+                    })
+            dettagli_multipla = "\n".join(
+                f"{x['player']} {x['side'].upper()} {x['line']} {market_short.get(x['market'], x['market'])}"
+                for x in legs
             )
         else:
+            n_legs = 1
+            legs = []
             dettagli_multipla = ""
         c1, c2, c3, c4 = st.columns(4)
         linea_b = c1.number_input("Linea", value=20.0, step=0.5)
@@ -2443,8 +2461,8 @@ def bankroll_page():
         if submit_bet:
             if formato == "Singola" and not str(giocatore).strip():
                 st.warning("Per una singola inserisci il giocatore.")
-            elif formato == "Multipla" and not str(dettagli_multipla).strip():
-                st.warning("Per una multipla inserisci i dettagli della schedina.")
+            elif formato == "Multipla" and len(legs) < 2:
+                st.warning("Per una multipla inserisci almeno 2 selezioni complete.")
             else:
                 profit = (round(stake * (quota - 1), 2) if risultato == "Vinto"
                           else (-stake if risultato == "Perso" else 0.0))
@@ -2457,12 +2475,13 @@ def bankroll_page():
                     "Giocatore": giocatore_store,
                     "Stat": stat_store,
                     "Tipo": tipo_store,
-                    "Linea": linea_b,
+                    "Linea": linea_b if formato == "Singola" else 0.0,
                     "Quota": quota,
                     "Stake €": stake,
                     "Risultato": risultato,
                     "P&L €": profit,
                     "Bookmaker": bookmaker,
+                    "Numero Selezioni": int(n_legs) if formato == "Multipla" else 1,
                     "Dettagli Multipla": dettagli_multipla if formato == "Multipla" else "",
                     "Note": note,
                 })
@@ -2503,6 +2522,8 @@ def bankroll_page():
         df_bets["Formato"] = "Singola"
     if "Dettagli Multipla" not in df_bets.columns:
         df_bets["Dettagli Multipla"] = ""
+    if "Numero Selezioni" not in df_bets.columns:
+        df_bets["Numero Selezioni"] = 1
     if "Note" not in df_bets.columns:
         df_bets["Note"] = ""
     if "Data" in df_bets.columns:
@@ -2809,7 +2830,7 @@ def bankroll_page():
 
     st.markdown("#### 📄 Storico Scommesse")
     show_cols = [
-        c for c in ["Data", "Formato", "Giocatore", "Dettagli Multipla", "Stat", "Tipo", "Linea", "Quota", "Stake €", "Risultato", "P&L €", "Bookmaker", "Note"]
+        c for c in ["Data", "Formato", "Numero Selezioni", "Giocatore", "Dettagli Multipla", "Stat", "Tipo", "Linea", "Quota", "Stake €", "Risultato", "P&L €", "Bookmaker", "Note"]
         if c in df_view.columns
     ]
     st.dataframe(df_view[show_cols], width="stretch", hide_index=True)
