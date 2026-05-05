@@ -4148,7 +4148,13 @@ def _value_label(edge: float):
     return "NO BET"
 
 
-def _kelly_stake(prob_pct: float, odd: float, bankroll: float, fraction: float = 1.0) -> float:
+def _kelly_stake(
+    prob_pct: float,
+    odd: float,
+    bankroll: float,
+    fraction: float = 1.0,
+    max_pct_bankroll: float = 2.0,
+) -> float:
     if odd <= 1 or prob_pct <= 0 or bankroll <= 0:
         return 0.0
     p = max(0.0, min(1.0, prob_pct / 100.0))
@@ -4156,7 +4162,11 @@ def _kelly_stake(prob_pct: float, odd: float, bankroll: float, fraction: float =
     kelly = (b * p - (1 - p)) / b
     if kelly <= 0:
         return 0.0
-    return round(bankroll * kelly * max(0.0, min(1.0, fraction)), 2)
+    stake = bankroll * kelly * max(0.0, min(1.0, fraction))
+    if max_pct_bankroll > 0 and bankroll > 0:
+        cap = bankroll * (max_pct_bankroll / 100.0)
+        stake = min(stake, cap)
+    return round(stake, 2)
 
 
 def _evaluate_player_value_rows(
@@ -4220,13 +4230,24 @@ def _scan_value_with_real_odds(
     time_mode: str,
     odds_pick_mode: str = "conservative",
     bookmaker_filter: str = "",
+    kelly_cap_pct: float = 2.0,
 ):
     """
     Modalità AUTO con linee/quote reali da The Odds API.
     """
+    empty_quality = {
+        "events_scanned": 0,
+        "props_missing": 0,
+        "players_seen": 0,
+        "players_injury_blocked": 0,
+        "players_name_miss": 0,
+        "players_team_miss": 0,
+        "rows_line_plausibility_drop": 0,
+        "rows_created": 0,
+    }
     events = fetch_oddsapi_nba_events(api_key)
     if not events:
-        return None, "Nessun evento NBA disponibile (verifica API key The Odds API)."
+        return None, "Nessun evento NBA disponibile (verifica API key The Odds API).", empty_quality
 
     now_utc = datetime.datetime.now(datetime.timezone.utc)
     horizon = {
@@ -4250,7 +4271,7 @@ def _scan_value_with_real_odds(
             filtered_events.append((ev, ev_dt))
 
     if not filtered_events:
-        return None, "Nessun evento NBA nel filtro orario richiesto."
+        return None, "Nessun evento NBA nel filtro orario richiesto.", empty_quality
 
     # mappa team API->roster locale
     teams_local = {t["id"]: t for t in fetch_teams(SEASON)}
@@ -4260,6 +4281,16 @@ def _scan_value_with_real_odds(
 
     rows = []
     debug_info = []
+    quality = {
+        "events_scanned": len(filtered_events),
+        "props_missing": 0,
+        "players_seen": 0,
+        "players_injury_blocked": 0,
+        "players_name_miss": 0,
+        "players_team_miss": 0,
+        "rows_line_plausibility_drop": 0,
+        "rows_created": 0,
+    }
     injury_cache: dict[int, list] = {}
 
     for ev, ev_dt in filtered_events:
@@ -4273,6 +4304,7 @@ def _scan_value_with_real_odds(
             bookmaker_filter=bookmaker_filter,
         )
         if not props:
+            quality["props_missing"] += 1
             debug_info.append(f"{home_name} vs {away_name}: nessuna prop disponibile")
             continue
 
@@ -4298,6 +4330,7 @@ def _scan_value_with_real_odds(
                 injury_cache[tid_i] = fetch_team_injuries(int(tid_i), SEASON) or []
 
         for p in roster_players:
+            quality["players_seen"] += 1
             pid = p.get("id")
             pname = p.get("name")
             if not pid or not pname:
@@ -4307,10 +4340,12 @@ def _scan_value_with_real_odds(
 
             blocked, inj_tag = _injury_excludes_player_for_alerts(pname, injuries_ev)
             if blocked:
+                quality["players_injury_blocked"] += 1
                 continue
 
             matched_props, matched_key, match_kind = _match_player_props(pname, props)
             if not matched_props:
+                quality["players_name_miss"] += 1
                 continue
             df_all = get_nba_data(int(pid), pname, SEASON, API_KEY, phase_selected)
             if isinstance(df_all, str) or df_all is None or df_all.empty:
@@ -4323,6 +4358,7 @@ def _scan_value_with_real_odds(
                 try:
                     roster_tid = int(df_r["TEAM_ID"].iloc[0])
                     if roster_tid != team_tid:
+                        quality["players_team_miss"] += 1
                         continue
                 except (TypeError, ValueError):
                     pass
@@ -4336,6 +4372,7 @@ def _scan_value_with_real_odds(
 
                 plausible, _msg = _alert_prop_line_credible(stat_col, line_val, avg)
                 if not plausible:
+                    quality["rows_line_plausibility_drop"] += 1
                     continue
 
                 hit = float((df_r[stat_col] > line_val).mean() * 100)
@@ -4368,23 +4405,33 @@ def _scan_value_with_real_odds(
                         "Implied %": round(implied, 1),
                         "Edge %": round(edge, 1),
                         "Hit Rate %": round(hit, 1),
-                        "Kelly €": _kelly_stake(prob, float(over_odd), bankroll, kelly_frac),
+                        # Kelly capped per rischio operativo
+                        "Kelly €": _kelly_stake(
+                            prob, float(over_odd), bankroll, kelly_frac,
+                            max_pct_bankroll=kelly_cap_pct
+                        ),
                         "Signal": _value_label(edge),
                         "Match": f"{away_name} @ {home_name}",
                         "Verifica": note_txt,
+                        "Quote As Of (UTC)": now_utc.strftime("%Y-%m-%d %H:%M:%S"),
                     })
+                    quality["rows_created"] += 1
 
     if not rows:
         hint = "; ".join(debug_info[:12]) if debug_info else ""
         base = ("Nessuna prop incrociabile coi roster dopo i nuovi filtri di sicurezza, oppure soglie troppo strette.")
-        return None, f"{base}" + (f"\n\n(Dettaglio: {hint})" if hint else "")
+        return None, f"{base}" + (f"\n\n(Dettaglio: {hint})" if hint else ""), quality
 
     df = pd.DataFrame(rows)
+    # dedup forte: stessa pick (match+giocatore+stat+linea) una sola volta, tenendo edge migliore
+    dedup_keys = ["Match", "Giocatore", "Stat", "Linea"]
+    df = df.sort_values(["Edge %", "Prob Over %"], ascending=False)
+    df = df.drop_duplicates(subset=dedup_keys, keep="first").reset_index(drop=True)
     df = df[(df["Edge %"] >= min_edge) & (df["Hit Rate %"] >= min_hit)]
     if df.empty:
-        return None, "Nessuna value bet con i filtri correnti."
+        return None, "Nessuna value bet con i filtri correnti.", quality
     df = df.sort_values(["Edge %", "Prob Over %"], ascending=False).reset_index(drop=True)
-    return df, None
+    return df, None, quality
 
 
 def value_alerts_page(linee: dict, n_partite: int):
@@ -4438,6 +4485,12 @@ def value_alerts_page(linee: dict, n_partite: int):
         k1, k2 = st.columns(2)
         bankroll_for_kelly_a = k1.number_input("Bankroll riferimento (€)", min_value=10.0, value=1000.0, step=50.0, key="alert_bk_ref_auto")
         kelly_fraction_a = k2.slider("Kelly frazionato", 0.05, 1.0, 0.25, step=0.05, key="alert_kelly_frac_auto")
+        kelly_cap_pct_a = st.slider(
+            "Cap stake Kelly (% bankroll)",
+            0.5, 5.0, 2.0, step=0.1,
+            key="alert_kelly_cap_pct_auto",
+            help="Limite massimo stake per pick. Es. 2.0 = max 2% del bankroll anche se Kelly teorico e' piu' alto."
+        )
         o1, o2 = st.columns(2)
         odds_mode_label = o1.selectbox(
             "Strategia quote",
@@ -4465,7 +4518,7 @@ def value_alerts_page(linee: dict, n_partite: int):
             return
 
         with st.spinner("Scarico eventi NBA, props e calcolo value..."):
-            df_auto, err = _scan_value_with_real_odds(
+            df_auto, err, qstats = _scan_value_with_real_odds(
                 api_key=odds_key,
                 n_partite=n_partite,
                 phase_selected=phase_selected,
@@ -4476,6 +4529,7 @@ def value_alerts_page(linee: dict, n_partite: int):
                 time_mode=time_mode_a,
                 odds_pick_mode=odds_mode_map.get(odds_mode_label, "conservative"),
                 bookmaker_filter=bookmaker_filter,
+                kelly_cap_pct=float(kelly_cap_pct_a),
             )
         if err:
             st.warning(err)
@@ -4493,6 +4547,12 @@ def value_alerts_page(linee: dict, n_partite: int):
             f"Quote calcolate in modalita': **{odds_mode_label}**"
             + (f" · filtro bookmaker: **{bookmaker_filter}**" if bookmaker_filter else "")
         )
+        q1, q2, q3, q4 = st.columns(4)
+        q1.metric("Eventi scansionati", int((qstats or {}).get("events_scanned", 0)))
+        q2.metric("Player visti", int((qstats or {}).get("players_seen", 0)))
+        q3.metric("Scarti injury", int((qstats or {}).get("players_injury_blocked", 0)))
+        q4.metric("Scarti mismatch", int((qstats or {}).get("players_name_miss", 0))
+                  + int((qstats or {}).get("players_team_miss", 0)))
         st.dataframe(df_auto, width="stretch", hide_index=True)
 
         top = df_auto.head(5)
