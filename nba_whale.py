@@ -2418,10 +2418,19 @@ def bankroll_page():
 
     st.markdown("#### ➕ Inserisci scommessa")
     with st.form("add_bet"):
-        b1, b2, b3 = st.columns(3)
+        b0, b1, b2, b3 = st.columns(4)
+        formato = b0.selectbox("Formato", ["Singola", "Multipla"])
         giocatore = b1.text_input("Giocatore")
         stat_bet = b2.selectbox("Mercato", ["Punti", "Rimbalzi", "Assist"])
         esito = b3.selectbox("Direzione", ["Over", "Under"])
+        if formato == "Multipla":
+            dettagli_multipla = st.text_area(
+                "Dettagli multipla (una selezione per riga)",
+                placeholder="Es:\nMitchell OVER 4.5 REB\nHachimura OVER 12.5 PTS",
+                height=90,
+            )
+        else:
+            dettagli_multipla = ""
         c1, c2, c3, c4 = st.columns(4)
         linea_b = c1.number_input("Linea", value=20.0, step=0.5)
         quota = c2.number_input("Quota", value=1.90, step=0.05, min_value=1.01)
@@ -2430,25 +2439,37 @@ def bankroll_page():
         d1, d2 = st.columns(2)
         bookmaker = d1.text_input("Bookmaker (opzionale)")
         note = d2.text_input("Note (opzionale)")
-        if st.form_submit_button("Aggiungi scommessa") and giocatore:
-            profit = (round(stake * (quota - 1), 2) if risultato == "Vinto"
-                      else (-stake if risultato == "Perso" else 0.0))
-            st.session_state.bets.append({
-                "Data": str(datetime.date.today()),
-                "Giocatore": giocatore,
-                "Stat": stat_bet,
-                "Tipo": esito,
-                "Linea": linea_b,
-                "Quota": quota,
-                "Stake €": stake,
-                "Risultato": risultato,
-                "P&L €": profit,
-                "Bookmaker": bookmaker,
-                "Note": note,
-            })
-            _save_bankroll_state()
-            st.success(f"✅ Scommessa su {giocatore} registrata.")
-            st.rerun()
+        submit_bet = st.form_submit_button("Aggiungi scommessa")
+        if submit_bet:
+            if formato == "Singola" and not str(giocatore).strip():
+                st.warning("Per una singola inserisci il giocatore.")
+            elif formato == "Multipla" and not str(dettagli_multipla).strip():
+                st.warning("Per una multipla inserisci i dettagli della schedina.")
+            else:
+                profit = (round(stake * (quota - 1), 2) if risultato == "Vinto"
+                          else (-stake if risultato == "Perso" else 0.0))
+                stat_store = stat_bet if formato == "Singola" else "Multipla"
+                tipo_store = esito if formato == "Singola" else "Parlay"
+                giocatore_store = giocatore if formato == "Singola" else "MULTIPLA"
+                st.session_state.bets.append({
+                    "Data": str(datetime.date.today()),
+                    "Formato": formato,
+                    "Giocatore": giocatore_store,
+                    "Stat": stat_store,
+                    "Tipo": tipo_store,
+                    "Linea": linea_b,
+                    "Quota": quota,
+                    "Stake €": stake,
+                    "Risultato": risultato,
+                    "P&L €": profit,
+                    "Bookmaker": bookmaker,
+                    "Dettagli Multipla": dettagli_multipla if formato == "Multipla" else "",
+                    "Note": note,
+                })
+                _save_bankroll_state()
+                label_ok = giocatore_store if formato == "Singola" else "multipla"
+                st.success(f"✅ Scommessa {label_ok} registrata.")
+                st.rerun()
 
     if not st.session_state.bets:
         st.info("Nessuna scommessa ancora. Inserisci dal form o importa CSV.")
@@ -2478,6 +2499,10 @@ def bankroll_page():
     df_bets = pd.DataFrame(st.session_state.bets).copy()
     if "Bookmaker" not in df_bets.columns:
         df_bets["Bookmaker"] = ""
+    if "Formato" not in df_bets.columns:
+        df_bets["Formato"] = "Singola"
+    if "Dettagli Multipla" not in df_bets.columns:
+        df_bets["Dettagli Multipla"] = ""
     if "Note" not in df_bets.columns:
         df_bets["Note"] = ""
     if "Data" in df_bets.columns:
@@ -2784,7 +2809,7 @@ def bankroll_page():
 
     st.markdown("#### 📄 Storico Scommesse")
     show_cols = [
-        c for c in ["Data", "Giocatore", "Stat", "Tipo", "Linea", "Quota", "Stake €", "Risultato", "P&L €", "Bookmaker", "Note"]
+        c for c in ["Data", "Formato", "Giocatore", "Dettagli Multipla", "Stat", "Tipo", "Linea", "Quota", "Stake €", "Risultato", "P&L €", "Bookmaker", "Note"]
         if c in df_view.columns
     ]
     st.dataframe(df_view[show_cols], width="stretch", hide_index=True)
