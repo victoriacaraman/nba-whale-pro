@@ -3546,10 +3546,22 @@ def fetch_oddsapi_nba_events(api_key: str):
 
 
 @st.cache_data(ttl=300)
-def fetch_oddsapi_event_props(api_key: str, event_id: str, regions: str = "us,eu,uk"):
+def fetch_oddsapi_event_props(
+    api_key: str,
+    event_id: str,
+    regions: str = "us,eu,uk",
+    odds_pick_mode: str = "conservative",
+    bookmaker_filter: str = "",
+):
     """
     Restituisce dict con linee/quote per player_points, player_rebounds, player_assists.
     Formato: { player_name: { 'PTS': {'line': X, 'over_odds': Y, 'under_odds': Z}, ... } }
+    odds_pick_mode:
+      - conservative: quota OVER minima (piu' realistica/prudente)
+      - best: quota OVER massima (ottimistica)
+      - average: media quote OVER disponibili
+    bookmaker_filter:
+      keyword opzionale (es. "bovada", "bet365", "pinnacle"), case-insensitive.
     """
     if not api_key or not event_id:
         return {}
@@ -3576,8 +3588,22 @@ def fetch_oddsapi_event_props(api_key: str, event_id: str, regions: str = "us,eu
         "player_rebounds": "REB",
         "player_assists": "AST",
     }
-    props = {}
+    def _pick_price(prices: list[float], mode: str):
+        if not prices:
+            return None
+        if mode == "best":
+            return float(max(prices))
+        if mode == "average":
+            return float(sum(prices) / len(prices))
+        return float(min(prices))  # conservative
+
+    raw = {}
+    bf = (bookmaker_filter or "").strip().lower()
+
     for bookmaker in payload.get("bookmakers", []) or []:
+        book_title = str(bookmaker.get("title", "") or "")
+        if bf and bf not in book_title.lower():
+            continue
         for market in bookmaker.get("markets", []) or []:
             mkey = market.get("key")
             stat_col = market_to_stat.get(mkey)
@@ -3592,22 +3618,54 @@ def fetch_oddsapi_event_props(api_key: str, event_id: str, regions: str = "us,eu
                 side = (outcome.get("name") or "").lower()
                 if line_val is None or price is None:
                     continue
-                slot = props.setdefault(player, {}).setdefault(stat_col, {
-                    "line": float(line_val),
-                    "over_odds": None,
-                    "under_odds": None,
-                    "bookmaker": bookmaker.get("title", ""),
+                slot = raw.setdefault(player, {}).setdefault(stat_col, {})
+                line_key = float(line_val)
+                bucket = slot.setdefault(line_key, {
+                    "over_prices": [],
+                    "under_prices": [],
+                    "bookmakers": [],
                 })
                 if "over" in side:
-                    if slot["over_odds"] is None or float(price) > slot["over_odds"]:
-                        slot["over_odds"] = float(price)
-                        slot["line"] = float(line_val)
-                        slot["bookmaker"] = bookmaker.get("title", "")
+                    bucket["over_prices"].append(float(price))
+                    bucket["bookmakers"].append(book_title)
                 elif "under" in side:
-                    if slot["under_odds"] is None or float(price) > slot["under_odds"]:
-                        slot["under_odds"] = float(price)
-                        slot["line"] = float(line_val)
-                        slot["bookmaker"] = bookmaker.get("title", "")
+                    bucket["under_prices"].append(float(price))
+                    bucket["bookmakers"].append(book_title)
+
+    props = {}
+    for player, by_stat in raw.items():
+        for stat_col, lines_map in by_stat.items():
+            # Scegli la linea con maggiore copertura (n book), poi la piu' "centrale" come tie-break.
+            best_line = None
+            best_bucket = None
+            best_score = -1
+            for ln, b in lines_map.items():
+                n_prices = len(b["over_prices"]) + len(b["under_prices"])
+                n_books = len(set(b["bookmakers"]))
+                score = n_prices + n_books * 2
+                if score > best_score:
+                    best_score = score
+                    best_line = ln
+                    best_bucket = b
+                elif score == best_score and best_line is not None:
+                    # tie-break: preferisci la linea numericamente piu' bassa (piu' standard su over bassi)
+                    if float(ln) < float(best_line):
+                        best_line = ln
+                        best_bucket = b
+            if best_bucket is None:
+                continue
+
+            over_pick = _pick_price(best_bucket["over_prices"], odds_pick_mode)
+            under_pick = _pick_price(best_bucket["under_prices"], odds_pick_mode)
+            if over_pick is None and under_pick is None:
+                continue
+            book = ", ".join(sorted(set(best_bucket["bookmakers"])))[:180]
+            props.setdefault(player, {})[stat_col] = {
+                "line": float(best_line),
+                "over_odds": over_pick,
+                "under_odds": under_pick,
+                "bookmaker": book or "N/A",
+            }
     return props
 
 
@@ -4151,7 +4209,18 @@ def _evaluate_player_value_rows(
     return rows
 
 
-def _scan_value_with_real_odds(api_key: str, n_partite: int, phase_selected: str, bankroll: float, kelly_frac: float, min_edge: float, min_hit: float, time_mode: str):
+def _scan_value_with_real_odds(
+    api_key: str,
+    n_partite: int,
+    phase_selected: str,
+    bankroll: float,
+    kelly_frac: float,
+    min_edge: float,
+    min_hit: float,
+    time_mode: str,
+    odds_pick_mode: str = "conservative",
+    bookmaker_filter: str = "",
+):
     """
     Modalità AUTO con linee/quote reali da The Odds API.
     """
@@ -4197,7 +4266,12 @@ def _scan_value_with_real_odds(api_key: str, n_partite: int, phase_selected: str
         event_id = ev.get("id")
         home_name = ev.get("home_team", "")
         away_name = ev.get("away_team", "")
-        props = fetch_oddsapi_event_props(api_key, event_id)
+        props = fetch_oddsapi_event_props(
+            api_key,
+            event_id,
+            odds_pick_mode=odds_pick_mode,
+            bookmaker_filter=bookmaker_filter,
+        )
         if not props:
             debug_info.append(f"{home_name} vs {away_name}: nessuna prop disponibile")
             continue
@@ -4364,6 +4438,24 @@ def value_alerts_page(linee: dict, n_partite: int):
         k1, k2 = st.columns(2)
         bankroll_for_kelly_a = k1.number_input("Bankroll riferimento (€)", min_value=10.0, value=1000.0, step=50.0, key="alert_bk_ref_auto")
         kelly_fraction_a = k2.slider("Kelly frazionato", 0.05, 1.0, 0.25, step=0.05, key="alert_kelly_frac_auto")
+        o1, o2 = st.columns(2)
+        odds_mode_label = o1.selectbox(
+            "Strategia quote",
+            ["Conservativa (quota minima)", "Media bookmaker", "Ottimistica (quota massima)"],
+            index=0,
+            key="alert_odds_pick_mode",
+        )
+        bookmaker_filter = o2.text_input(
+            "Filtro bookmaker (opzionale)",
+            value="",
+            placeholder="es. bovada / bet365 / pinnacle",
+            key="alert_bookmaker_filter",
+        )
+        odds_mode_map = {
+            "Conservativa (quota minima)": "conservative",
+            "Media bookmaker": "average",
+            "Ottimistica (quota massima)": "best",
+        }
 
         if not st.button("🔎 Scansiona linee reali"):
             st.info("Premi per scaricare linee/quote reali e generare alert.")
@@ -4382,6 +4474,8 @@ def value_alerts_page(linee: dict, n_partite: int):
                 min_edge=float(min_edge_a),
                 min_hit=float(min_hit_a),
                 time_mode=time_mode_a,
+                odds_pick_mode=odds_mode_map.get(odds_mode_label, "conservative"),
+                bookmaker_filter=bookmaker_filter,
             )
         if err:
             st.warning(err)
@@ -4395,6 +4489,10 @@ def value_alerts_page(linee: dict, n_partite: int):
             "**match** reale."
         )
         st.caption("Solo segnali OVER (compatibili con Eplay24). Under disabilitati.")
+        st.caption(
+            f"Quote calcolate in modalita': **{odds_mode_label}**"
+            + (f" · filtro bookmaker: **{bookmaker_filter}**" if bookmaker_filter else "")
+        )
         st.dataframe(df_auto, width="stretch", hide_index=True)
 
         top = df_auto.head(5)
