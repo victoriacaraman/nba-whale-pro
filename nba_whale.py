@@ -342,6 +342,29 @@ st.markdown("""
 }
 html,body,[class*="css"]{background-color:var(--bg);color:var(--text);font-family:'Inter',sans-serif;}
 section[data-testid="stSidebar"]{background-color:#0D1117;border-right:1px solid var(--border);}
+section[data-testid="stSidebar"] .block-container{padding-top:0.9rem;}
+section[data-testid="stSidebar"] hr{margin:0.65rem 0 0.85rem 0;border-color:#27313a;}
+section[data-testid="stSidebar"] [data-testid="stRadio"] > div{gap:0.25rem;}
+section[data-testid="stSidebar"] [data-testid="stRadio"] label{
+  background:#111722;border:1px solid #24303b;border-radius:10px;padding:8px 10px;
+}
+section[data-testid="stSidebar"] [data-testid="stRadio"] label:has(input:checked){
+  border-color:#00D4AA;background:rgba(0,212,170,0.10);
+}
+section[data-testid="stSidebar"] [data-baseweb="select"] > div,
+section[data-testid="stSidebar"] .stSlider,
+section[data-testid="stSidebar"] [data-testid="stCheckbox"]{
+  background:#10161f;border:1px solid #24303b;border-radius:10px;padding:4px 8px;
+}
+.sb-card{
+  background:linear-gradient(135deg,#0F1520 0%,#101924 100%);
+  border:1px solid #24303b;border-radius:14px;padding:12px 12px;margin-bottom:10px;
+}
+.sb-title{color:#E6EDF3;font-size:0.76rem;font-weight:700;letter-spacing:.5px;text-transform:uppercase;}
+.sb-sub{color:#8B949E;font-size:0.72rem;}
+.sb-chip{display:inline-block;padding:2px 8px;border-radius:999px;font-size:0.66rem;font-weight:700;margin-left:6px;}
+.sb-chip-ok{background:rgba(0,212,170,.18);color:#00D4AA;border:1px solid rgba(0,212,170,.4);}
+.sb-chip-off{background:rgba(255,82,82,.14);color:#ff8b8b;border:1px solid rgba(255,82,82,.35);}
 .whale-header{background:linear-gradient(135deg,#0E1117 0%,#161B22 100%);
   border:1px solid var(--border);border-radius:12px;padding:24px 32px;margin-bottom:24px;}
 .whale-header h1{margin:0;font-size:2rem;font-weight:800;letter-spacing:-1px;color:var(--accent);}
@@ -5441,17 +5464,17 @@ Non costituisce consulenza finanziaria. Il gioco d'azzardo può causare dipenden
 
 with st.sidebar:
     st.markdown(
-        '<div style="text-align:center;padding:12px 0 8px;">'
-        '<span style="font-size:2rem;">🐋</span><br>'
-        f'<strong style="color:#00D4AA;font-size:1.1rem;">NBA Whale Pro</strong>'
+        '<div class="sb-card" style="text-align:center;">'
+        '<span style="font-size:1.9rem;">🐋</span><br>'
+        f'<strong style="color:#00D4AA;font-size:1.06rem;">NBA Whale Pro</strong>'
         f'<span class="badge">v{VERSION}</span><br>'
-        f'<span style="color:#8B949E;font-size:0.75rem;">Stagione 20{SEASON}-20{int(SEASON)+1}</span>'
+        f'<span class="sb-sub">Stagione 20{SEASON}-20{int(SEASON)+1}</span>'
         '</div>', unsafe_allow_html=True)
-    st.markdown("---")
 
     if "nav_page" not in st.session_state:
         st.session_state["nav_page"] = "🏠 Home"
 
+    st.markdown('<div class="sb-title">Navigazione</div>', unsafe_allow_html=True)
     pagina = st.radio("Navigazione",
                       ["🏠 Home", "📊 Analisi Singolo", "⚔️ Confronto", "🏀 Squadre",
                        "🚨 Alert Value", "🧰 Toolkit Pro", "📈 Tipster Pro",
@@ -5460,14 +5483,13 @@ with st.sidebar:
                       label_visibility="collapsed")
     st.markdown("---")
 
-    st.markdown("**🏁 Tipo partite**")
-    phase_type = st.selectbox(
-        "Competizione",
-        ["Tutte", "Regular Season", "Play-In", "Playoff"],
-        index=0,
-        key="phase_type",
-    )
-    st.markdown("---")
+    with st.expander("🏁 Contesto partite", expanded=True):
+        phase_type = st.selectbox(
+            "Competizione",
+            ["Tutte", "Regular Season", "Play-In", "Playoff"],
+            index=0,
+            key="phase_type",
+        )
 
     st.session_state.setdefault("l_pts", 22.5)
     st.session_state.setdefault("l_reb", 5.5)
@@ -5478,15 +5500,19 @@ with st.sidebar:
         "AST": float(st.session_state["l_ast"]),
     }
 
-    st.markdown("**📅 Finestre di analisi**")
-    n_partite = st.slider("Ultime gare",    5, 20, 10, key="n_gare")
-    n_slump   = st.slider("Finestra slump", 3, 10,  5, key="n_slump")
-    st.checkbox("Usa tutte le partite giocate", value=False, key="use_all_games")
+    with st.expander("📅 Finestre analisi", expanded=True):
+        n_partite = st.slider("Ultime gare",    5, 20, 10, key="n_gare")
+        n_slump   = st.slider("Finestra slump", 3, 10,  5, key="n_slump")
+        st.checkbox("Usa tutte le partite giocate", value=False, key="use_all_games")
     st.markdown("---")
 
-    api_ok = "🟢 Configurata" if API_KEY else "🔴 Mancante"
-    st.caption(f"API Key: {api_ok}")
-    with st.expander("📚 Legenda veloce acronimi"):
+    chip = '<span class="sb-chip sb-chip-ok">OK</span>' if API_KEY else '<span class="sb-chip sb-chip-off">Mancante</span>'
+    st.markdown(
+        f'<div class="sb-card"><div class="sb-title">Stato connessione</div>'
+        f'<div class="sb-sub">API SPORTS {chip}</div></div>',
+        unsafe_allow_html=True
+    )
+    with st.expander("📚 Legenda acronimi"):
         st.caption("PTS punti · REB rimbalzi · AST assist · STL rubate · BLK stoppate · TOV perse · MIN minuti · PF/PA punti fatti/subiti")
     integ = player_integrity_report()
     if integ["collisions"]:
