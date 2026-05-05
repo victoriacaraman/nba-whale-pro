@@ -1125,31 +1125,96 @@ def fetch_team_players(team_id: int, season: str):
         return []
 
 
-@st.cache_data(ttl=900)
-def fetch_team_injuries(team_id: int, season: str):
-    """
-    Prova a scaricare injury report dal provider.
-    Ritorna lista di dict con name/status/position, oppure [] se non disponibile.
-    """
+def _parse_injury_api_items(
+    raw_list: list,
+    filter_team_id: int | None,
+    strict_team_match: bool = False,
+) -> list[dict]:
+    """Normalizza righe `/injuries` e opzionalmente filtra per `team.id`."""
+    out: list[dict] = []
+    for it in raw_list or []:
+        if not isinstance(it, dict):
+            continue
+        team_obj = it.get("team") or it.get("teams") or {}
+        if isinstance(team_obj, list) and team_obj:
+            team_obj = team_obj[0]
+        tid_row = team_obj.get("id") if isinstance(team_obj, dict) else None
+        if filter_team_id is not None:
+            if tid_row is not None:
+                if int(tid_row) != int(filter_team_id):
+                    continue
+            elif strict_team_match:
+                # Risposta “bulk” stagione: senza team.id non possiamo attribuire la franchigia
+                continue
+
+        player = it.get("player") or {}
+        firstname = (player.get("firstname") or "").strip()
+        lastname = (player.get("lastname") or "").strip()
+        full_name = (
+            f"{firstname} {lastname}".strip()
+            or str(player.get("name") or "").strip()
+            or "Unknown"
+        )
+        inj_obj = it.get("injury") if isinstance(it.get("injury"), dict) else {}
+        status = (
+            str(it.get("status") or it.get("type") or "").strip()
+            or str(inj_obj.get("status") or inj_obj.get("type") or inj_obj.get("detail") or "").strip()
+            or str(it.get("reason") or "").strip()
+            or str(it.get("comment") or "").strip()
+        )
+        if not status:
+            status = "In lista infortuni"
+
+        pos = (
+            (player.get("leagues", {}) or {}).get("standard", {}).get("pos", "")
+            or player.get("position", "")
+            or (player.get("leagues", {}) or {}).get("standard", {}).get("position", "")
+        )
+        out.append({"name": full_name, "status": status, "position": str(pos)})
+    return out
+
+
+def _injuries_request(params: dict) -> list:
     try:
-        r = _api_get("/injuries", {"team": team_id, "season": season})
-        resp = r.json().get("response", [])
-        out = []
-        for it in resp:
-            player = (it.get("player") or {})
-            firstname = (player.get("firstname") or "").strip()
-            lastname = (player.get("lastname") or "").strip()
-            full_name = f"{firstname} {lastname}".strip() or (player.get("name") or "").strip() or "Unknown"
-            status = (
-                (it.get("status") or "")
-                or (it.get("injury") or {}).get("status", "")
-                or (it.get("reason") or "")
-            )
-            position = (player.get("leagues", {}) or {}).get("standard", {}).get("pos", "") or player.get("position", "")
-            out.append({"name": full_name, "status": str(status), "position": str(position)})
-        return out
+        r = _api_get("/injuries", params)
+        return r.json().get("response", []) or []
     except Exception:
         return []
+
+
+@st.cache_data(ttl=600)
+def fetch_team_injuries(team_id: int, season: str):
+    """
+    Injury report squadra. L’API può rispondere in forme diverse: prova più combinazioni
+    di parametri e, se serve, scarica per stagione e filtra per `team.id`.
+    """
+    if not team_id:
+        return []
+    tid = int(team_id)
+    s = str(season)
+    param_chain: list[dict] = [
+        {"team": tid, "season": s},
+        {"team": tid, "season": s, "league": "standard"},
+        {"team": tid},
+    ]
+    for p in param_chain:
+        raw = _injuries_request(p)
+        strict = "team" not in p
+        parsed = _parse_injury_api_items(raw, tid, strict_team_match=strict)
+        if parsed:
+            return parsed
+
+    # Fallback: elenco stagionale (molte risposte includono team.id)
+    for bulk in (
+        {"season": s},
+        {"season": s, "league": "standard"},
+    ):
+        raw = _injuries_request(bulk)
+        parsed = _parse_injury_api_items(raw, tid, strict_team_match=True)
+        if parsed:
+            return parsed
+
+    return []
 
 
 def _position_weight(pos: str) -> float:
@@ -1166,40 +1231,68 @@ def _position_weight(pos: str) -> float:
 def infer_injury_impact(injuries: list):
     """
     Trasforma injury list in metriche operative: out_count, usage_loss, weighted_impact.
+    Qualsiasi giocatore in lista con uno status non riconosciuto viene comunque conteggiato
+    come 'altro infortunio' (come dubbio leggero) così non spariscono nomi tipo Day-To-Day.
     """
     if not injuries:
         return {
             "out_count": 0,
             "questionable_count": 0,
+            "other_count": 0,
             "usage_loss_pct": 0.0,
             "weighted_impact": 0.0,
             "notes": [],
         }
     out_count = 0
     questionable_count = 0
+    other_count = 0
     usage_loss = 0.0
     weighted_impact = 0.0
     notes = []
     for item in injuries:
         status = str(item.get("status", "")).lower()
+        name = item.get("name") or "?"
         pos = str(item.get("position", ""))
         w = _position_weight(pos)
-        if any(k in status for k in ["out", "inactive", "dnp", "suspended"]):
+
+        out_kw = (
+            "out", "inactive", "dnp", "suspended", "wnp", "will not play",
+            "not playing", "surgery", "fracture", "tear", "torn", "sprain", "illness — out",
+        )
+        q_kw = (
+            "questionable", "probable", "doubt", "gtd", "game time",
+            "day to day", "day-to-day", "game-time decision", "likely",
+            "illness", "conditioning", "protocol", "rest", "reconditioning",
+        )
+
+        is_out = any(k in status for k in out_kw)
+        is_q = any(k in status for k in q_kw)
+        # Es.: "Out For Season", "Ruled Out"
+        if not is_out and ("ruled out" in status or "for season" in status or "out for" in status):
+            is_out = True
+
+        if is_out:
             out_count += 1
             usage_loss += 3.5 * w
             weighted_impact += 4.0 * w
-            notes.append(f"OUT: {item.get('name')} ({pos or '?'})")
-        elif any(k in status for k in ["questionable", "probable", "doubt", "gtd"]):
+            notes.append(f"OUT: {name} ({pos or '?'}) · {item.get('status', '')}")
+        elif is_q:
             questionable_count += 1
             usage_loss += 1.3 * w
             weighted_impact += 1.8 * w
-            notes.append(f"Q: {item.get('name')} ({pos or '?'})")
+            notes.append(f"Dubbio: {name} ({pos or '?'}) · {item.get('status', '')}")
+        else:
+            other_count += 1
+            usage_loss += 1.0 * w
+            weighted_impact += 1.2 * w
+            notes.append(f"⚠️ {name} ({pos or '?'}) · {item.get('status', '')}")
     return {
         "out_count": out_count,
         "questionable_count": questionable_count,
+        "other_count": other_count,
         "usage_loss_pct": round(usage_loss, 2),
         "weighted_impact": round(weighted_impact, 2),
-        "notes": notes[:10],
+        "notes": notes[:16],
     }
 
 
@@ -1483,7 +1576,8 @@ def compute_toolkit_multifactor_projection(
     defense_boost = impact_opp["weighted_impact"] / 100.0
     total_boost = max(-0.25, min(0.25, usage_boost * 0.6 + defense_boost * 0.4))
     inj_note = (
-        f"Infortuni: **{impact_my['out_count']}** OUT / **{impact_my['questionable_count']}** dubbi nella sua squadra "
+        f"Infortuni: **{impact_my['out_count']}** OUT / **{impact_my['questionable_count']}** dubbi "
+        f"/ **{impact_my.get('other_count', 0)}** altri in lista nella sua squadra "
         f"(usage stimato “liberato” ~**{impact_my['usage_loss_pct']:.1f}%**); "
         f"nella squadra avversaria stress difesa stimato ~**{impact_opp['weighted_impact']:.1f}** "
         f"→ moltiplicatore combinato sul box score **{1 + total_boost:.3f}**."
@@ -1501,7 +1595,9 @@ def compute_toolkit_multifactor_projection(
     min_avg = float(pd.to_numeric(min_series, errors="coerce").dropna().mean() or 28.0)
     delta_min = min(
         10.0,
-        impact_my["out_count"] * 1.2 + impact_my["questionable_count"] * 0.4,
+        impact_my["out_count"] * 1.2
+        + impact_my["questionable_count"] * 0.4
+        + impact_my.get("other_count", 0) * 0.35,
     )
     min_scale = 1.0 + max(-0.06, min(0.08, (delta_min / max(min_avg, 12.0)) * 0.35))
     min_note = (
@@ -2527,25 +2623,27 @@ def toolkit_pro_page(linee: dict, n_partite: int):
         iop = mf["impact_opp"]
         with ig1:
             st.markdown("##### 🩹 La sua squadra")
-            if imy["out_count"] == 0 and imy["questionable_count"] == 0:
-                st.success("Nessun OUT/Q rilevante in lista.")
+            if imy["out_count"] == 0 and imy["questionable_count"] == 0 and imy.get("other_count", 0) == 0:
+                st.success("Nessun nome in lista infortuni API.")
             else:
                 st.warning(
                     f"OUT **{imy['out_count']}** · Dubbi **{imy['questionable_count']}** · "
+                    f"Altri **{imy.get('other_count', 0)}** · "
                     f"Usage stimato liberato **{imy['usage_loss_pct']:.1f}%**"
                 )
-                for note in imy["notes"][:4]:
+                for note in imy["notes"][:6]:
                     st.caption(f"• {note}")
         with ig2:
             st.markdown(f"##### 🩹 {opp.get('opponent_code', '?')} (avversario)")
-            if iop["out_count"] == 0 and iop["questionable_count"] == 0:
-                st.success("Nessun OUT/Q rilevante in lista.")
+            if iop["out_count"] == 0 and iop["questionable_count"] == 0 and iop.get("other_count", 0) == 0:
+                st.success("Nessun nome in lista infortuni API.")
             else:
                 st.warning(
                     f"OUT **{iop['out_count']}** · Dubbi **{iop['questionable_count']}** · "
+                    f"Altri **{iop.get('other_count', 0)}** · "
                     f"Stress difesa stimato **{iop['weighted_impact']:.1f}**"
                 )
-                for note in iop["notes"][:4]:
+                for note in iop["notes"][:6]:
                     st.caption(f"• {note}")
 
         pm1, pm2, pm3 = st.columns(3)
@@ -2781,7 +2879,12 @@ def toolkit_pro_page(linee: dict, n_partite: int):
                     "opp_out_count": auto_opp["out_count"],
                     "teammate_usage_loss": auto_tm["usage_loss_pct"],
                     "opp_def_weakness": auto_opp["weighted_impact"],
-                    "expected_min_delta": min(10.0, auto_tm["out_count"] * 1.2 + auto_tm["questionable_count"] * 0.4),
+                    "expected_min_delta": min(
+                        10.0,
+                        auto_tm["out_count"] * 1.2
+                        + auto_tm["questionable_count"] * 0.4
+                        + auto_tm.get("other_count", 0) * 0.35,
+                    ),
                     "team_notes": auto_tm["notes"],
                     "opp_notes": auto_opp["notes"],
                 }
@@ -3945,19 +4048,21 @@ def single_player_page(linee: dict, n_partite: int, n_slump: int):
         ig1, ig2 = st.columns(2)
         with ig1:
             st.markdown(f"##### 🩹 Infortuni · **{my_team_label}**")
-            if impact_my["out_count"] == 0 and impact_my["questionable_count"] == 0:
-                st.info("✅ Nessun infortunio rilevato.")
+            if impact_my["out_count"] == 0 and impact_my["questionable_count"] == 0 and impact_my.get("other_count", 0) == 0:
+                st.info("✅ Nessun nome in lista infortuni API per questa squadra.")
             else:
                 st.warning(f"OUT: {impact_my['out_count']} · Dubbi: {impact_my['questionable_count']} · "
+                           f"Altri: {impact_my.get('other_count', 0)} · "
                            f"Usage perso: {impact_my['usage_loss_pct']:.1f}%")
                 for note in impact_my["notes"][:5]:
                     st.caption(f"  • {note}")
         with ig2:
             st.markdown(f"##### 🩹 Infortuni · **{opp['opponent_name']} ({opp['opponent_code']})**")
-            if impact_opp["out_count"] == 0 and impact_opp["questionable_count"] == 0:
-                st.info("✅ Nessun infortunio rilevato.")
+            if impact_opp["out_count"] == 0 and impact_opp["questionable_count"] == 0 and impact_opp.get("other_count", 0) == 0:
+                st.info("✅ Nessun nome in lista infortuni API per questa squadra.")
             else:
                 st.warning(f"OUT: {impact_opp['out_count']} · Dubbi: {impact_opp['questionable_count']} · "
+                           f"Altri: {impact_opp.get('other_count', 0)} · "
                            f"Defense weakness: {impact_opp['weighted_impact']:.1f}")
                 for note in impact_opp["notes"][:5]:
                     st.caption(f"  • {note}")
