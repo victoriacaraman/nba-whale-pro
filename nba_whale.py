@@ -766,6 +766,98 @@ def fetch_team_games(team_id: int, season: str, api_key: str) -> dict:
         return {}
 
 
+def _player_team_id_from_df(df_all: pd.DataFrame):
+    """Estrae il team_id del giocatore dalla partita più recente in archivio."""
+    if df_all is None or df_all.empty or "TEAM_ID" not in df_all.columns:
+        return None
+    try:
+        sorted_df = df_all.sort_values("GAME_DATE", ascending=False)
+        return int(sorted_df.iloc[0]["TEAM_ID"])
+    except Exception:
+        return None
+
+
+@st.cache_data(ttl=600)
+def find_next_game_for_team(team_id: int, season: str):
+    """Ritorna il prossimo game non finito per un team, o None."""
+    if not team_id:
+        return None
+    try:
+        r = _api_get("/games", {"team": int(team_id), "season": season})
+        games = r.json().get("response", []) or []
+    except Exception:
+        return None
+
+    today = datetime.date.today()
+    upcoming = []
+    for g in games:
+        is_finished, _, is_live = _game_status_flags(g)
+        if is_finished:
+            continue
+        date_str = ((g.get("date") or {}).get("start", "") or "")[:10]
+        if not date_str:
+            continue
+        try:
+            d = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+        except Exception:
+            continue
+        # Includiamo anche le partite "live" e quelle di oggi
+        if d < today:
+            continue
+        upcoming.append((d, is_live, g))
+    if not upcoming:
+        return None
+    # Ordina: prima i live (oggi), poi per data crescente
+    upcoming.sort(key=lambda x: (not x[1], x[0]))
+    return upcoming[0][2]
+
+
+def _opponent_info_from_game(game: dict, my_team_id: int) -> dict:
+    """Da un game raw + mio team_id ricava: opponent_id, opponent_name, opponent_code,
+    location ('Home'/'Away'), datetime di start (UTC isoformat)."""
+    teams = game.get("teams", {}) or {}
+    home = teams.get("home", {}) or {}
+    vis = teams.get("visitors", {}) or {}
+    home_id = int(home.get("id") or 0)
+    vis_id  = int(vis.get("id") or 0)
+    if my_team_id == home_id:
+        opp = vis
+        location = "Home"
+    elif my_team_id == vis_id:
+        opp = home
+        location = "Away"
+    else:
+        opp = vis if vis_id else home
+        location = "?"
+    date_obj = game.get("date", {}) or {}
+    status_obj = game.get("status", {}) or {}
+    return {
+        "opponent_id":   int(opp.get("id") or 0),
+        "opponent_name": opp.get("name") or opp.get("nickname") or "Avversario",
+        "opponent_code": (opp.get("code") or "?").upper(),
+        "location": location,
+        "start_iso": date_obj.get("start", "") or "",
+        "status_long": status_obj.get("long", "") or "",
+    }
+
+
+def _format_next_game_when(start_iso: str) -> tuple:
+    """Da ISO datetime → (data_str, giorni_da_oggi)."""
+    if not start_iso:
+        return "Data sconosciuta", None
+    try:
+        # api-sports ritorna in UTC. Per l'utente è ok mostrare la data, l'orario Roma è +1/+2.
+        dt = datetime.datetime.fromisoformat(start_iso.replace("Z", "+00:00"))
+        # Convertiamo in fuso italiano (CET/CEST) approssimando con +1 ore (è una stima, basta per la giornata)
+        dt_local = dt + datetime.timedelta(hours=2)  # estate; durante l'inverno sarebbe +1
+        days_from_now = (dt_local.date() - datetime.date.today()).days
+        weekday_it = ["Lun","Mar","Mer","Gio","Ven","Sab","Dom"][dt_local.weekday()]
+        date_str = f"{weekday_it} {dt_local.strftime('%d/%m/%Y')} alle {dt_local.strftime('%H:%M')} (ora ITA)"
+        return date_str, days_from_now
+    except Exception:
+        return start_iso, None
+
+
 @st.cache_data(ttl=1800)
 def get_nba_data(player_id: int, player_name: str, season: str, api_key: str, phase_selected: str = "Tutte"):
     """
@@ -2374,6 +2466,167 @@ def single_player_page(linee: dict, n_partite: int, n_slump: int):
     if "STL" in df_r.columns: c4.metric("STL medi", f"{df_r['STL'].mean():.1f}")
     if "BLK" in df_r.columns: c5.metric("BLK medi", f"{df_r['BLK'].mean():.1f}")
     st.markdown("---")
+
+    # ── 🗓️ Prossima Partita (auto da api-sports) ─────────────────────────
+    my_team_id = _player_team_id_from_df(df_all)
+    next_game = find_next_game_for_team(my_team_id, SEASON) if my_team_id else None
+
+    if next_game:
+        opp = _opponent_info_from_game(next_game, my_team_id)
+        date_str, days_from_now = _format_next_game_when(opp["start_iso"])
+
+        # Auto-fetch injuries (no manual input!)
+        with st.spinner("Caricamento report infortuni..."):
+            inj_my  = fetch_team_injuries(int(my_team_id), SEASON)
+            inj_opp = fetch_team_injuries(int(opp["opponent_id"]), SEASON) if opp["opponent_id"] else []
+        impact_my  = infer_injury_impact(inj_my)
+        impact_opp = infer_injury_impact(inj_opp)
+
+        # Header box
+        sede_emoji  = "🏠 in casa" if opp["location"] == "Home" else ("✈️ in trasferta" if opp["location"] == "Away" else "")
+        days_lbl = (
+            "🔴 OGGI" if days_from_now == 0
+            else "🟡 DOMANI" if days_from_now == 1
+            else f"⏳ Tra {days_from_now} giorni" if days_from_now and days_from_now > 0
+            else ""
+        )
+        st.markdown(
+            f"""
+<div style="background:linear-gradient(135deg,#161B22 0%,#1c2735 100%);
+            border:1px solid #00D4AA;border-radius:12px;padding:18px 20px;margin-bottom:14px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">
+        <div>
+            <span style="color:#8B949E;font-size:0.8rem;letter-spacing:1px;">🗓️ PROSSIMA PARTITA</span><br>
+            <strong style="color:#00D4AA;font-size:1.4rem;">vs {opp['opponent_name']} ({opp['opponent_code']})</strong>
+            <span style="color:#E6EDF3;font-size:1rem;margin-left:8px;">{sede_emoji}</span>
+        </div>
+        <div style="text-align:right;">
+            <span style="color:#FFD600;font-size:1.05rem;font-weight:600;">{days_lbl}</span><br>
+            <span style="color:#8B949E;font-size:0.85rem;">{date_str}</span>
+        </div>
+    </div>
+</div>
+""",
+            unsafe_allow_html=True,
+        )
+
+        # Statistiche attese vs questo opponent (se ha già giocato in passato)
+        df_vs_opp = pd.DataFrame()
+        if "MATCHUP" in df_all.columns:
+            mask = df_all["MATCHUP"].apply(_extract_opponent) == opp["opponent_code"]
+            df_vs_opp = df_all[mask]
+
+        # ── Box infortuni (auto) ────────────────────────────────────────────
+        # Trova il nome del team del giocatore (best effort)
+        my_team_label = ""
+        try:
+            for t in fetch_teams(SEASON):
+                if int(t.get("id", 0)) == int(my_team_id):
+                    my_team_label = t.get("name", "")
+                    break
+        except Exception:
+            pass
+        if not my_team_label:
+            my_team_label = f"Squadra di {resolved_name.split()[0]}"
+
+        ig1, ig2 = st.columns(2)
+        with ig1:
+            st.markdown(f"##### 🩹 Infortuni · **{my_team_label}**")
+            if impact_my["out_count"] == 0 and impact_my["questionable_count"] == 0:
+                st.info("✅ Nessun infortunio rilevato.")
+            else:
+                st.warning(f"OUT: {impact_my['out_count']} · Dubbi: {impact_my['questionable_count']} · "
+                           f"Usage perso: {impact_my['usage_loss_pct']:.1f}%")
+                for note in impact_my["notes"][:5]:
+                    st.caption(f"  • {note}")
+        with ig2:
+            st.markdown(f"##### 🩹 Infortuni · **{opp['opponent_name']} ({opp['opponent_code']})**")
+            if impact_opp["out_count"] == 0 and impact_opp["questionable_count"] == 0:
+                st.info("✅ Nessun infortunio rilevato.")
+            else:
+                st.warning(f"OUT: {impact_opp['out_count']} · Dubbi: {impact_opp['questionable_count']} · "
+                           f"Defense weakness: {impact_opp['weighted_impact']:.1f}")
+                for note in impact_opp["notes"][:5]:
+                    st.caption(f"  • {note}")
+
+        # ── Stat attese contro l'avversario ────────────────────────────────
+        st.markdown("##### 🎯 Stat attese per la prossima partita")
+
+        # Base: media stagionale del giocatore. Se ha già giocato vs questo opponent, usa quella media (pesata).
+        season_pts = float(df_all["PTS"].mean()) if "PTS" in df_all.columns and not df_all.empty else 0.0
+        season_reb = float(df_all["REB"].mean()) if "REB" in df_all.columns and not df_all.empty else 0.0
+        season_ast = float(df_all["AST"].mean()) if "AST" in df_all.columns and not df_all.empty else 0.0
+
+        if not df_vs_opp.empty:
+            vs_pts = float(df_vs_opp["PTS"].mean()) if "PTS" in df_vs_opp.columns else season_pts
+            vs_reb = float(df_vs_opp["REB"].mean()) if "REB" in df_vs_opp.columns else season_reb
+            vs_ast = float(df_vs_opp["AST"].mean()) if "AST" in df_vs_opp.columns else season_ast
+            n_vs   = len(df_vs_opp)
+            # Mix 50/50 fra media stagionale e media vs opponent (smoothing per pochi sample)
+            blend = max(0.4, min(0.7, n_vs / 5.0))  # più sample → più peso alla media vs opponent
+            exp_pts = vs_pts * blend + season_pts * (1 - blend)
+            exp_reb = vs_reb * blend + season_reb * (1 - blend)
+            exp_ast = vs_ast * blend + season_ast * (1 - blend)
+            base_note = f"📊 Già giocate **{n_vs} partite** vs {opp['opponent_code']} (media PTS {vs_pts:.1f})."
+        else:
+            exp_pts, exp_reb, exp_ast = season_pts, season_reb, season_ast
+            base_note = f"⚠️ Nessuna partita pregressa vs {opp['opponent_code']} questa stagione → uso media stagionale."
+
+        # Adjustment euristico injuries: usage liberato dai miei compagni → boost prob; difesa avversaria debole → boost prob
+        usage_boost   = impact_my["usage_loss_pct"] / 100.0    # es 12% → +0.12
+        defense_boost = impact_opp["weighted_impact"] / 100.0   # es 10% → +0.10
+        total_boost   = usage_boost * 0.6 + defense_boost * 0.4
+        # Limite: ±25%
+        total_boost = max(-0.25, min(0.25, total_boost))
+
+        adj_pts = exp_pts * (1 + total_boost)
+        adj_reb = exp_reb * (1 + total_boost * 0.6)
+        adj_ast = exp_ast * (1 + total_boost * 0.6)
+
+        st.caption(base_note + (
+            f" Aggiustamento contesto applicato: **{total_boost*100:+.1f}%** "
+            f"(usage compagni assenti +{usage_boost*100:.0f}% · "
+            f"difesa avversaria +{defense_boost*100:.0f}%)."
+            if total_boost != 0 else ""
+        ))
+
+        # Probabilità Over con stat attese
+        p_pts = (1 - poisson.cdf(linee["PTS"], adj_pts)) * 100 if adj_pts > 0 else 0.0
+        p_reb = (1 - poisson.cdf(linee["REB"], adj_reb)) * 100 if adj_reb > 0 else 0.0
+        p_ast = (1 - poisson.cdf(linee["AST"], adj_ast)) * 100 if adj_ast > 0 else 0.0
+
+        eg1, eg2, eg3 = st.columns(3)
+        eg1.metric("PUNTI attesi",    f"{adj_pts:.1f}", delta=f"linea {linee['PTS']} · Over {p_pts:.0f}%")
+        eg2.metric("RIMBALZI attesi", f"{adj_reb:.1f}", delta=f"linea {linee['REB']} · Over {p_reb:.0f}%")
+        eg3.metric("ASSIST attesi",   f"{adj_ast:.1f}", delta=f"linea {linee['AST']} · Over {p_ast:.0f}%")
+
+        # Bar chart riepilogo
+        fig_next = go.Figure()
+        fig_next.add_trace(go.Bar(
+            name="Atteso", x=["Punti", "Rimbalzi", "Assist"],
+            y=[adj_pts, adj_reb, adj_ast],
+            marker_color="#00D4AA",
+            text=[f"{v:.1f}" for v in [adj_pts, adj_reb, adj_ast]],
+            textposition="outside",
+        ))
+        fig_next.add_trace(go.Bar(
+            name="Linea Over/Under", x=["Punti", "Rimbalzi", "Assist"],
+            y=[linee["PTS"], linee["REB"], linee["AST"]],
+            marker_color="#FF5252",
+            text=[f"{v}" for v in [linee["PTS"], linee["REB"], linee["AST"]]],
+            textposition="outside",
+        ))
+        fig_next.update_layout(barmode="group", height=320, template="plotly_dark",
+                               legend=dict(orientation="h", y=1.12),
+                               margin=dict(t=40, b=20, l=20, r=20),
+                               yaxis_title="Valore atteso")
+        st.plotly_chart(fig_next, width="stretch")
+
+        st.markdown("---")
+    else:
+        st.info("📭 Nessuna partita programmata trovata per questo giocatore. "
+                "Forse la stagione è finita o l'API non ha ancora il calendario aggiornato.")
+        st.markdown("---")
 
     with st.expander("📚 Legenda acronimi (Analisi Singolo)"):
         st.markdown("""
