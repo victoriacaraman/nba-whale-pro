@@ -5474,13 +5474,42 @@ with st.sidebar:
     if "nav_page" not in st.session_state:
         st.session_state["nav_page"] = "🏠 Home"
 
-    st.markdown('<div class="sb-title">Navigazione</div>', unsafe_allow_html=True)
-    pagina = st.radio("Navigazione",
-                      ["🏠 Home", "📊 Analisi Singolo", "⚔️ Confronto", "🏀 Squadre",
-                       "🚨 Alert Value", "🧰 Toolkit Pro", "📈 Tipster Pro",
-                       "🩺 Salute Dati", "💰 Bankroll", "ℹ️ Guida"],
-                      key="nav_page",
-                      label_visibility="collapsed")
+    st.markdown('<div class="sb-title">Navigazione rapida</div>', unsafe_allow_html=True)
+    nav_map = {
+        "🏠 Home": "🏠 Home",
+        "📊 Analisi": "📊 Analisi Singolo",
+        "🚨 Alert Value": "🚨 Alert Value",
+        "💰 Bankroll": "💰 Bankroll",
+    }
+    nav_labels = list(nav_map.keys())
+    current_page = st.session_state.get("nav_page", "🏠 Home")
+    current_label = next((k for k, v in nav_map.items() if v == current_page), "🏠 Home")
+    pagina_compatta = st.radio(
+        "Navigazione",
+        nav_labels,
+        index=nav_labels.index(current_label) if current_label in nav_labels else 0,
+        key="nav_compact",
+        label_visibility="collapsed",
+    )
+    pagina = nav_map.get(pagina_compatta, "🏠 Home")
+    st.session_state["nav_page"] = pagina
+
+    qa1, qa2 = st.columns(2)
+    qa1.button("🔎 Alert", key="quick_to_alert", on_click=_navigate_to, args=("🚨 Alert Value",))
+    qa2.button("💸 Bankroll", key="quick_to_bankroll", on_click=_navigate_to, args=("💰 Bankroll",))
+    if st.session_state.get("nav_page") in {"🚨 Alert Value", "💰 Bankroll"}:
+        pagina = st.session_state.get("nav_page", pagina)
+
+    with st.expander("🧩 Altro", expanded=False):
+        extra = st.selectbox(
+            "Apri sezione",
+            ["—", "⚔️ Confronto", "🏀 Squadre", "🧰 Toolkit Pro", "📈 Tipster Pro", "🩺 Salute Dati", "ℹ️ Guida"],
+            index=0,
+            key="nav_extra_select",
+        )
+        if extra != "—":
+            pagina = extra
+            st.session_state["nav_page"] = extra
     st.markdown("---")
 
     with st.expander("🏁 Contesto partite", expanded=True):
