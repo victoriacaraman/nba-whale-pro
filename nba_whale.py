@@ -5713,24 +5713,15 @@ with st.sidebar:
     if "nav_page" not in st.session_state:
         st.session_state["nav_page"] = "🏠 Home"
 
-    st.markdown('<div class="sb-title">Menu principale</div>', unsafe_allow_html=True)
-    m1, m2 = st.columns(2)
-    m1.button("🏠 Home", on_click=_navigate_to, args=("🏠 Home",))
-    m2.button("📊 Analisi", on_click=_navigate_to, args=("📊 Analisi Singolo",))
-    m3, m4 = st.columns(2)
-    m3.button("🚨 Alert", on_click=_navigate_to, args=("🚨 Alert Value",))
-    m4.button("💰 Bankroll", on_click=_navigate_to, args=("💰 Bankroll",))
-
-    with st.expander("🧩 Avanzate", expanded=False):
-        extra = st.selectbox(
-            "Apri sezione",
-            ["—", "⚔️ Confronto", "🏀 Squadre", "🧰 Toolkit Pro", "📈 Tipster Pro", "🩺 Salute Dati", "ℹ️ Guida"],
-            index=0,
-            key="nav_extra_select",
-        )
-        if extra != "—":
-            st.session_state["nav_page"] = extra
-    pagina = st.session_state.get("nav_page", "🏠 Home")
+    st.markdown('<div class="sb-title">Navigazione</div>', unsafe_allow_html=True)
+    pagina = st.radio(
+        "Navigazione",
+        ["🏠 Home", "📊 Analisi Singolo", "⚔️ Confronto", "🏀 Squadre",
+         "🚨 Alert Value", "🧰 Toolkit Pro", "📈 Tipster Pro",
+         "🩺 Salute Dati", "💰 Bankroll", "ℹ️ Guida"],
+        key="nav_page",
+        label_visibility="collapsed",
+    )
     st.markdown("---")
 
     with st.expander("🏁 Contesto partite", expanded=True):
