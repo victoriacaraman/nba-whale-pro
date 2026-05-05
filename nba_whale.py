@@ -2536,6 +2536,11 @@ def bankroll_page():
     c_left, c_right = st.columns([1.8, 1.2])
     with c_left:
         st.markdown("#### 📈 Equity Curve")
+        st.caption(
+            "Mostra l'andamento del bankroll nel tempo (una scommessa chiusa dopo l'altra). "
+            "Linea in salita = crescita, in discesa = drawdown. "
+            "La linea tratteggiata indica il bankroll iniziale."
+        )
         if not chiuse.empty:
             chiuse_plot = chiuse.sort_values("Data_dt", ascending=True).copy()
             chiuse_plot["Equity"] = float(st.session_state.bankroll_start) + chiuse_plot["P&L €"].cumsum()
@@ -2562,6 +2567,10 @@ def bankroll_page():
 
     with c_right:
         st.markdown("#### 🧩 Breakdown Mercato")
+        st.caption(
+            "Confronta i risultati per mercato (Punti, Rimbalzi, Assist) per capire "
+            "dove stai performando meglio: barre verdi = profit, rosse = perdita."
+        )
         if not chiuse.empty:
             by_stat = chiuse.groupby("Stat", dropna=False).agg(
                 Bets=("Stat", "count"),
