@@ -2334,6 +2334,12 @@ def _format_alerts_for_telegram(df: pd.DataFrame, max_rows: int = 10,
         )
         if meta:
             line += f"\n   <i>{meta}</i>"
+        verifica = str(r.get("Verifica", "") or "").strip()
+        if verifica:
+            line += f"\n   ⚠️ <i>{verifica}</i>"
+        bk_pl = str(r.get("Su bookmaker", "") or "").strip()
+        if bk_pl and bk_pl != str(giocatore):
+            line += f"\n   📌 Odds API name: <i>{bk_pl}</i>"
         lines.append(line)
     lines.append(f"\n<i>NBA Whale Pro v{VERSION}</i>")
     return "\n".join(lines)
@@ -3608,23 +3614,119 @@ def fetch_oddsapi_event_props(api_key: str, event_id: str, regions: str = "us,eu
 def _normalize_player_key(name: str) -> str:
     s = (name or "").lower().strip()
     s = s.replace(".", "").replace("'", "").replace("-", " ")
-    return " ".join(s.split())
+    toks = " ".join(s.split()).split()
+    _suffix = {"jr", "sr", "ii", "iii", "iv", "v", "junior", "senior"}
+    while toks and toks[-1] in _suffix:
+        toks.pop()
+    return " ".join(toks)
+
+
+def _first_name_similarity(a: str, b: str) -> float:
+    """Similarità sul solo primo nome token (usa difflib)."""
+    if not a or not b:
+        return 0.0
+    return difflib.SequenceMatcher(None, a, b).ratio()
 
 
 def _match_player_props(target_name: str, props_dict: dict):
+    """Associa il nome roster al giocatore usato dal bookmaker nelle props Odds API.
+
+    Non usare mai il solo cognome: su OKC coesistono ad es. *Jalen Williams* e *Jaylin Williams*;
+    un match debole assegnerebbe la linea sbagliata e gonfierebbe probabilità/Kelly.
+
+    Ritorna (dict stat → info, chiave_odd_api, tipo_match).
+    tipo_match ∈ {'exact','fuzzy', 'none'}.
+    """
+    if not target_name or not props_dict:
+        return None, None, "none"
     target_key = _normalize_player_key(target_name)
-    if target_key in {_normalize_player_key(k): k for k in props_dict.keys()}:
-        # exact match
-        for k in props_dict.keys():
-            if _normalize_player_key(k) == target_key:
-                return props_dict[k], k
-    # partial fallback (cognome)
-    last = target_key.split()[-1] if target_key else ""
-    if last:
-        for k in props_dict.keys():
-            if last in _normalize_player_key(k):
-                return props_dict[k], k
-    return None, None
+    for k in props_dict.keys():
+        if _normalize_player_key(k) == target_key:
+            return props_dict[k], k, "exact"
+
+    t_parts = target_key.split()
+    if len(t_parts) < 2:
+        return None, None, "none"
+    t_first, t_last = t_parts[0], t_parts[-1]
+
+    best_k = None
+    best_fn_ratio = -1.0
+
+    for k in props_dict.keys():
+        nk = _normalize_player_key(k)
+        k_parts = nk.split()
+        if len(k_parts) < 2:
+            continue
+        k_first, k_last = k_parts[0], k_parts[-1]
+        if k_last != t_last:
+            continue
+        fn_ratio = _first_name_similarity(t_first, k_first)
+        # Soglia stretta sul nome di battesimo quando il cognome coincide
+        if fn_ratio >= 0.91:
+            if fn_ratio > best_fn_ratio:
+                best_fn_ratio = fn_ratio
+                best_k = k
+
+    if best_k is not None:
+        return props_dict[best_k], best_k, f"fuzzy(fn={best_fn_ratio:.2f})"
+
+    return None, None, "none"
+
+
+def _injury_excludes_player_for_alerts(full_name: str, injuries: list) -> tuple[bool, str]:
+    """True se l'injury report indica una esclusione prudenziale dagli alert automatici."""
+    tk = _normalize_player_key(full_name)
+    t_parts = tk.split()
+    if len(t_parts) < 2 or not injuries:
+        return False, ""
+    t_first, t_last = t_parts[0], t_parts[-1]
+    for it in injuries:
+        ik = _normalize_player_key(it.get("name") or "")
+        i_parts = ik.split()
+        if len(i_parts) < 2:
+            continue
+        i_first, i_last = i_parts[0], i_parts[-1]
+        if i_last != t_last:
+            continue
+        if _first_name_similarity(t_first, i_first) < 0.88:
+            continue
+        status = str(it.get("status", "") or "").lower()
+        if any(k in status for k in ("out", "inactive", "dnp", "suspended")):
+            return True, f"Injury: {str(it.get('status') or '').strip() or 'OUT'}"
+        if "doubt" in status:
+            return True, f"Injury: {str(it.get('status') or '').strip() or 'Doubts'}"
+    return False, ""
+
+
+def _alert_prop_line_credible(stat_col: str, line_val: float, season_avg: float) -> tuple[bool, str]:
+    """Scarta combinazioni probabilmente errate (nome/prop mismatch)."""
+    if line_val <= 0 or season_avg <= 0:
+        return False, ""
+    lv = float(line_val)
+    av = float(season_avg)
+
+    if stat_col == "PTS":
+        # es. scorer ~19 PPP con prop 5.5 → quasi sempre errore sul giocatore
+        if av >= 12 and lv < max(11.5, av * 0.58):
+            return False, (
+                "Linea troppo bassa vs media PPP — mismatch probabile con il nome sul bookmaker"
+            )
+        if lv > av + 12:
+            return False, "Linea troppo alta vs media PPP"
+
+    elif stat_col == "REB":
+        if av >= 8 and lv < max(4.5, av * 0.55):
+            return False, "Linea REB incoerente con la media"
+        if lv > av + 8:
+            return False, "Linea REB anomala"
+
+    elif stat_col == "AST":
+        if av >= 7 and lv < max(3.5, av * 0.55):
+            return False, "Linea AST incoerente con la media"
+        if lv > av + 7:
+            return False, "Linea AST anomala"
+
+    return True, ""
 
 
 def _attack_delta_label(delta: float):
@@ -4089,6 +4191,8 @@ def _scan_value_with_real_odds(api_key: str, n_partite: int, phase_selected: str
 
     rows = []
     debug_info = []
+    injury_cache: dict[int, list] = {}
+
     for ev, ev_dt in filtered_events:
         event_id = ev.get("id")
         home_name = ev.get("home_team", "")
@@ -4100,6 +4204,7 @@ def _scan_value_with_real_odds(api_key: str, n_partite: int, phase_selected: str
 
         # roster di entrambe le squadre dal nostro provider
         roster_players = []
+        match_team_ids: list[int] = []
         for tname in [home_name, away_name]:
             local_t = name_to_local_team.get(tname.lower())
             if not local_t:
@@ -4109,14 +4214,28 @@ def _scan_value_with_real_odds(api_key: str, n_partite: int, phase_selected: str
                         local_t = cand
                         break
             if local_t:
-                roster_players.extend(fetch_team_players(int(local_t["id"]), SEASON))
+                tid_i = int(local_t["id"])
+                match_team_ids.append(tid_i)
+                roster_players.extend(fetch_team_players(tid_i, SEASON))
+
+        # injury report squadre dell'evento (cache soft)
+        for tid_i in dict.fromkeys(match_team_ids):  # unici, ordine conservato
+            if tid_i not in injury_cache:
+                injury_cache[tid_i] = fetch_team_injuries(int(tid_i), SEASON) or []
 
         for p in roster_players:
             pid = p.get("id")
             pname = p.get("name")
             if not pid or not pname:
                 continue
-            matched_props, matched_key = _match_player_props(pname, props)
+            team_tid = int(p.get("team_id"))
+            injuries_ev = injury_cache.get(team_tid) or []
+
+            blocked, inj_tag = _injury_excludes_player_for_alerts(pname, injuries_ev)
+            if blocked:
+                continue
+
+            matched_props, matched_key, match_kind = _match_player_props(pname, props)
             if not matched_props:
                 continue
             df_all = get_nba_data(int(pid), pname, SEASON, API_KEY, phase_selected)
@@ -4125,26 +4244,51 @@ def _scan_value_with_real_odds(api_key: str, n_partite: int, phase_selected: str
             n_eff = len(df_all) if st.session_state.get("use_all_games", False) else n_partite
             df_r = df_all.head(max(1, n_eff)).copy()
 
+            # verifica roster attuale nella partita dell'alert
+            if "TEAM_ID" in df_r.columns:
+                try:
+                    roster_tid = int(df_r["TEAM_ID"].iloc[0])
+                    if roster_tid != team_tid:
+                        continue
+                except (TypeError, ValueError):
+                    pass
+
             for stat_col, info in matched_props.items():
                 line_val = float(info.get("line", 0))
                 over_odd = info.get("over_odds")
-                under_odd = info.get("under_odds")
                 if stat_col not in df_r.columns or line_val <= 0:
                     continue
                 avg = float(df_r[stat_col].mean())
+
+                plausible, _msg = _alert_prop_line_credible(stat_col, line_val, avg)
+                if not plausible:
+                    continue
+
                 hit = float((df_r[stat_col] > line_val).mean() * 100)
-                prob = float((1 - poisson.cdf(line_val, avg)) * 100 if avg > 0 else 0.0)
+                raw_prob = float((1 - poisson.cdf(line_val, avg)) * 100 if avg > 0 else 0.0)
+                # Evita saturation irrealistica (Poisson instabile sugli scenario estremi)
+                prob = min(round(raw_prob, 1), 96.5)
 
                 # OVER only (Eplay24 supporta solo Over per player props)
                 if over_odd:
                     implied = 100 / over_odd
                     edge = prob - implied
+                    book_label = (matched_key or pname).strip()
+                    note_txt = ""
+                    if _normalize_player_key(book_label) != _normalize_player_key(pname):
+                        note_txt = (
+                            f"Prop sul book intestata «{book_label}» ≠ roster «{pname}» · {match_kind}"
+                        )
+                    elif match_kind != "exact":
+                        note_txt = f"Variante grafica nome · {match_kind}"
+
                     rows.append({
                         "Giocatore": pname,
                         "Stat": stat_col,
                         "Linea": line_val,
                         "Quota Over": round(float(over_odd), 2),
                         "Bookmaker": info.get("bookmaker", ""),
+                        "Su bookmaker": book_label,
                         "Media": round(avg, 2),
                         "Prob Over %": round(prob, 1),
                         "Implied %": round(implied, 1),
@@ -4153,10 +4297,13 @@ def _scan_value_with_real_odds(api_key: str, n_partite: int, phase_selected: str
                         "Kelly €": _kelly_stake(prob, float(over_odd), bankroll, kelly_frac),
                         "Signal": _value_label(edge),
                         "Match": f"{away_name} @ {home_name}",
+                        "Verifica": note_txt,
                     })
 
     if not rows:
-        return None, "Nessuna prop incrociabile coi roster (prova ad aumentare le partite o a cambiare filtri)."
+        hint = "; ".join(debug_info[:12]) if debug_info else ""
+        base = ("Nessuna prop incrociabile coi roster dopo i nuovi filtri di sicurezza, oppure soglie troppo strette.")
+        return None, f"{base}" + (f"\n\n(Dettaglio: {hint})" if hint else "")
 
     df = pd.DataFrame(rows)
     df = df[(df["Edge %"] >= min_edge) & (df["Hit Rate %"] >= min_hit)]
@@ -4240,16 +4387,25 @@ def value_alerts_page(linee: dict, n_partite: int):
             st.warning(err)
             return
         st.success(f"Trovate {len(df_auto)} value bet OVER reali (linee + quote da bookmakers).")
+        st.info(
+            "**Controlli anti-errore:** le props del bookmaker si collegano al roster solo se **nome e cognome** "
+            "coincidono (mai solo il cognome: evita linee scambiate tipo Jalen/Jaylin Williams). "
+            "Escludiamo anche chi risulta OUT/Doubtful sull’injury API e le linee **incoerenti** con la media "
+            "stagionale/recente. Resta consigliata un’occhiata alla colonna **Su bookmaker** / **Verifica** e al "
+            "**match** reale."
+        )
         st.caption("Solo segnali OVER (compatibili con Eplay24). Under disabilitati.")
         st.dataframe(df_auto, width="stretch", hide_index=True)
 
         top = df_auto.head(5)
         st.markdown("#### 🔥 Top 5 Pick reali")
         for _, r in top.iterrows():
+            vz = str(r.get("Verifica", "") or "").strip()
+            ext = f" ⚠️ {vz}" if vz else ""
             st.write(
                 f"- **{r['Giocatore']} {r['Stat']} OVER {r['Linea']}** · "
                 f"Quota {r['Quota Over']} ({r['Bookmaker']}) · Prob {r['Prob Over %']}% · "
-                f"Edge {r['Edge %']}% · Kelly €{r['Kelly €']:.2f} · {r['Signal']} · {r['Match']}"
+                f"Edge {r['Edge %']}% · Kelly €{float(r['Kelly €']):.2f} · {r['Signal']} · {r['Match']}{ext}"
             )
 
         st.download_button(
