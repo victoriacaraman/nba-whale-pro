@@ -233,6 +233,88 @@ ODDS_API_KEY = _get_secret("ODDS_API_KEY", "")
 BASE_URL    = "https://v2.nba.api-sports.io"
 SEASON      = "2025"
 STAT_LABELS = {"PTS": "Punti", "REB": "Rimbalzi", "AST": "Assist"}
+
+# ── Tooltip / spiegazioni riusabili (passati a `help=` di st.metric) ───────────
+TOOLTIPS = {
+    "score": (
+        "📊 SCORE 0–100\n\n"
+        "Punteggio aggregato che combina:\n"
+        "• 40% probabilità Poisson di superare la linea\n"
+        "• 40% hit rate storico (quante volte ha superato la linea)\n"
+        "• 20% forma recente del giocatore\n\n"
+        "Soglie:\n"
+        "• <32 → BET UNDER\n"
+        "• 32-43 → Under probabile\n"
+        "• 43-57 → SKIP / incerto\n"
+        "• 57-68 → Over probabile\n"
+        "• 68+ → BET OVER"
+    ),
+    "poisson": (
+        "🎲 PROBABILITÀ POISSON\n\n"
+        "Probabilità che il giocatore superi la linea Over basata su un modello "
+        "statistico chiamato 'distribuzione di Poisson'.\n\n"
+        "In pratica: prende la sua media (es. 25 punti a partita) e calcola "
+        "la probabilità che in una data partita faccia PIÙ della linea (es. 22.5).\n\n"
+        "È la probabilità 'modello' (cosa dice la matematica).\n"
+        "Formula semplificata: 1 − P(X ≤ linea) dove X ~ Poisson(media)."
+    ),
+    "hit_rate": (
+        "🎯 HIT RATE (storico)\n\n"
+        "Percentuale di partite recenti in cui il giocatore ha effettivamente "
+        "superato la linea Over.\n\n"
+        "Esempio: linea 22.5 PTS, in 10 partite ha fatto Over 7 volte → "
+        "Hit Rate = 70%.\n\n"
+        "È la probabilità 'storica' (cosa è realmente successo)."
+    ),
+    "forma": (
+        "🔥 FORMA 0–100\n\n"
+        "Indicatore di come sta giocando ULTIMAMENTE rispetto alla sua media stagionale.\n\n"
+        "• 100 = sta giocando molto meglio del solito\n"
+        "• 50 = in linea con la sua media\n"
+        "• 0 = sta giocando molto peggio del solito\n\n"
+        "Si calcola dal trend ultime 3 partite vs ultime 10 partite, "
+        "con bonus per consistency (poche oscillazioni)."
+    ),
+    "trend": (
+        "📈 TREND (Ultime 3G - Ultime 10G)\n\n"
+        "Differenza tra la media delle ultime 3 partite e la media delle ultime 10.\n\n"
+        "Positivo = in salita (in forma)\n"
+        "Negativo = in calo\n\n"
+        "Esempio: +2.0 PTS = ultime 3 partite ~2 punti sopra la media delle ultime 10."
+    ),
+    "confidenza": (
+        "🎚️ CONFIDENZA 0–100\n\n"
+        "Quanto è prevedibile la sua performance partita per partita.\n\n"
+        "• ≥75 = molto stabile (puoi fidarti dei numeri)\n"
+        "• 50-75 = abbastanza stabile\n"
+        "• <50 = ballerino, attenzione\n\n"
+        "Si calcola come 100 − CV*100, dove CV è il coefficient of variation."
+    ),
+    "cv": (
+        "📐 CV (Coefficient of Variation)\n\n"
+        "Misura standard di volatilità: deviazione standard / media.\n\n"
+        "• <0.25 → stabile\n"
+        "• 0.25-0.40 → medio\n"
+        "• >0.40 → ballerino"
+    ),
+    "z_score": (
+        "📏 Z-SCORE LINEA\n\n"
+        "Distanza standardizzata della linea dalla sua media, espressa in deviazioni standard.\n\n"
+        "• Negativo → la linea è sotto la sua media (favorisce Over)\n"
+        "• Positivo → la linea è sopra la sua media (favorisce Under)\n\n"
+        "Esempio: Z = -0.8 significa che la linea è ~0.8 dev std sotto la media → "
+        "matematicamente probabile l'Over."
+    ),
+    "edge": (
+        "💡 EDGE (vantaggio)\n\n"
+        "Differenza tra la TUA probabilità stimata e la probabilità implicita "
+        "nella quota del bookmaker.\n\n"
+        "Esempio: tu stimi 60% Over, la quota 1.90 implica 52.6% → edge +7.4pp.\n\n"
+        "• ≥+7pp → value bet forte\n"
+        "• ≥+3pp → value bet moderata\n"
+        "• ≤-7pp → quota troppo bassa, NO BET"
+    ),
+}
 STAT_COLORS = {"PTS": "#00D4AA", "REB": "#3B9EFF", "AST": "#FF9F40"}
 VERSION     = "3.0"
 REQ_TIMEOUT = 15
@@ -1004,10 +1086,15 @@ def show_verdict_block(prob: float, hit: float, df_r: pd.DataFrame,
     bar_color = "#00D4AA" if color == "green" else ("#FFD600" if color == "yellow" else "#FF5252")
 
     v1, v2, v3, v4 = st.columns(4)
-    v1.metric("Score",    f"{score:.0f}/100")
-    v2.metric("Poisson",  f"{prob:.1f}%")
-    v3.metric("Hit Rate", f"{hit:.0f}%")
-    v4.metric("Forma",    f"{form:.0f}/100")
+    v1.metric("Score",    f"{score:.0f}/100", help=TOOLTIPS["score"])
+    v2.metric("Poisson",  f"{prob:.1f}%",     help=TOOLTIPS["poisson"])
+    v3.metric("Hit Rate", f"{hit:.0f}%",      help=TOOLTIPS["hit_rate"])
+    v4.metric("Forma",    f"{form:.0f}/100",  help=TOOLTIPS["forma"])
+    st.caption(
+        "💡 Passa il cursore sull'icona ❔ accanto a ogni metrica per la spiegazione completa. "
+        "In breve: **Score** = giudizio finale 0–100 · **Poisson** = probabilità modello · "
+        "**Hit Rate** = % partite reali sopra linea · **Forma** = trend recente vs media."
+    )
 
     st.markdown(
         f'<div class="verdict-box {css_class}">'
@@ -1671,12 +1758,14 @@ def toolkit_pro_page(linee: dict, n_partite: int):
 
         # Sezione: 6 KPI riassuntivi in alto
         k1, k2, k3, k4, k5, k6 = st.columns(6)
-        k1.metric("Media PTS 5G", f"{v(tools_df, '1'):.1f}")
-        k2.metric("Media PTS Stag.", f"{v(tools_df, '3'):.1f}")
-        k3.metric("Hit Rate PTS", f"{v(tools_df, '10'):.0f}%")
-        k4.metric("Prob Poisson PTS", f"{v(tools_df, '13'):.0f}%")
-        k5.metric("Trend PTS (3G-10G)", f"{v(tools_df, '16'):+.2f}")
-        k6.metric("Confidenza", f"{v(tools_df, '40'):.0f}/100")
+        k1.metric("Media PTS 5G", f"{v(tools_df, '1'):.1f}",
+                  help="Media punti nelle ultime 5 partite del giocatore.")
+        k2.metric("Media PTS Stag.", f"{v(tools_df, '3'):.1f}",
+                  help="Media punti su tutta la stagione (tutte le partite in archivio).")
+        k3.metric("Hit Rate PTS", f"{v(tools_df, '10'):.0f}%", help=TOOLTIPS["hit_rate"])
+        k4.metric("Prob Poisson PTS", f"{v(tools_df, '13'):.0f}%", help=TOOLTIPS["poisson"])
+        k5.metric("Trend PTS (3G-10G)", f"{v(tools_df, '16'):+.2f}", help=TOOLTIPS["trend"])
+        k6.metric("Confidenza", f"{v(tools_df, '40'):.0f}/100", help=TOOLTIPS["confidenza"])
 
         st.markdown("---")
         st.markdown("##### 📊 Medie a confronto · Ultime 5G · Ultime 10G · Stagione")
@@ -1758,12 +1847,9 @@ def toolkit_pro_page(linee: dict, n_partite: int):
         conf   = v(tools_df, "40")
         z      = v(tools_df, "39")
         cv1, cv2, cv3 = st.columns(3)
-        cv1.metric("Confidenza", f"{conf:.0f}/100",
-                   help="Inverso della volatilità. ≥75 stabilissimo · 50-75 buono · <50 imprevedibile.")
-        cv2.metric("CV (volatilità)", f"{cv_pts:.2f}",
-                   help="Coefficient of Variation. <0.25 stabile · 0.25-0.40 medio · >0.40 ballerino.")
-        cv3.metric("Z-Score linea", f"{z:+.2f}",
-                   help="Distanza standardizzata della linea dalla media. <0 = linea sotto la media (favorisce Over).")
+        cv1.metric("Confidenza", f"{conf:.0f}/100", help=TOOLTIPS["confidenza"])
+        cv2.metric("CV (volatilità)", f"{cv_pts:.2f}", help=TOOLTIPS["cv"])
+        cv3.metric("Z-Score linea", f"{z:+.2f}", help=TOOLTIPS["z_score"])
 
         score_core = (
             v(tools_df, "13") * 0.25
@@ -1882,9 +1968,12 @@ def toolkit_pro_page(linee: dict, n_partite: int):
         fair_odds = 100 / max(prob_adj_pts, 0.1)
 
         ev_c1, ev_c2, ev_c3 = st.columns(3)
-        ev_c1.metric("Prob. Modello (PTS)", f"{prob_adj_pts:.1f}%")
-        ev_c2.metric("Prob. implicita quota", f"{implied_prob:.1f}%")
-        ev_c3.metric("Edge", f"{edge:+.1f}pp", delta=f"fair ~{fair_odds:.2f}")
+        ev_c1.metric("Prob. Modello (PTS)", f"{prob_adj_pts:.1f}%",
+                     help="La TUA probabilità stimata (Poisson + correzioni di contesto). È la probabilità che il giocatore superi la linea Over secondo il modello.")
+        ev_c2.metric("Prob. implicita quota", f"{implied_prob:.1f}%",
+                     help="Probabilità ricavata dalla quota del bookmaker: 100/quota. Esempio: quota 1.90 → 52.6%.")
+        ev_c3.metric("Edge", f"{edge:+.1f}pp", delta=f"fair ~{fair_odds:.2f}",
+                     help=TOOLTIPS["edge"])
 
         if edge >= 7:
             st.success(f"🟢 **VALUE BET FORTE (PTS)** · edge +{edge:.1f}pp · fair odds ~ {fair_odds:.2f}")
@@ -2595,10 +2684,18 @@ def single_player_page(linee: dict, n_partite: int, n_slump: int):
         p_reb = (1 - poisson.cdf(linee["REB"], adj_reb)) * 100 if adj_reb > 0 else 0.0
         p_ast = (1 - poisson.cdf(linee["AST"], adj_ast)) * 100 if adj_ast > 0 else 0.0
 
+        _help_attesi = (
+            "Stat attese per la prossima partita.\n\n"
+            "Si parte dalla media stagionale e si applicano correzioni di contesto:\n"
+            "• boost se mancano compagni titolari (più usage)\n"
+            "• boost se l'avversario è una difesa debole\n"
+            "• malus se mancano playmaker chiave\n\n"
+            "Il delta sotto mostra la linea Over/Under e la probabilità Poisson di superarla."
+        )
         eg1, eg2, eg3 = st.columns(3)
-        eg1.metric("PUNTI attesi",    f"{adj_pts:.1f}", delta=f"linea {linee['PTS']} · Over {p_pts:.0f}%")
-        eg2.metric("RIMBALZI attesi", f"{adj_reb:.1f}", delta=f"linea {linee['REB']} · Over {p_reb:.0f}%")
-        eg3.metric("ASSIST attesi",   f"{adj_ast:.1f}", delta=f"linea {linee['AST']} · Over {p_ast:.0f}%")
+        eg1.metric("PUNTI attesi",    f"{adj_pts:.1f}", delta=f"linea {linee['PTS']} · Over {p_pts:.0f}%", help=_help_attesi)
+        eg2.metric("RIMBALZI attesi", f"{adj_reb:.1f}", delta=f"linea {linee['REB']} · Over {p_reb:.0f}%", help=_help_attesi)
+        eg3.metric("ASSIST attesi",   f"{adj_ast:.1f}", delta=f"linea {linee['AST']} · Over {p_ast:.0f}%", help=_help_attesi)
 
         # Bar chart riepilogo
         fig_next = go.Figure()
@@ -2678,9 +2775,12 @@ def single_player_page(linee: dict, n_partite: int, n_slump: int):
 
                 k1, k2, k3 = st.columns(3)
                 k1.metric("Sopra la linea", f"{hits}/{total}",
-                          delta=f"{(hits/total*100):.0f}%" if total else "—")
-                k2.metric("Media periodo", f"{avg_v:.1f}")
-                k3.metric("La tua linea", f"{linea}")
+                          delta=f"{(hits/total*100):.0f}%" if total else "—",
+                          help=TOOLTIPS["hit_rate"])
+                k2.metric("Media periodo", f"{avg_v:.1f}",
+                          help="Media della stat selezionata nelle partite mostrate nel grafico.")
+                k3.metric("La tua linea", f"{linea}",
+                          help="La linea Over/Under impostata nel pannello laterale. Le barre verdi sono partite sopra la linea, rosse sotto.")
 
                 fig = go.Figure()
                 fig.add_trace(go.Bar(
