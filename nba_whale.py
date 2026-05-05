@@ -361,6 +361,10 @@ BANKROLL_FILE = os.path.join(
     os.path.dirname(__file__) if "__file__" in globals() else ".",
     "bankroll_data.json",
 )
+ALERT_HISTORY_FILE = os.path.join(
+    os.path.dirname(__file__) if "__file__" in globals() else ".",
+    "alert_history.json",
+)
 
 st.markdown("""
 <style>
@@ -2310,6 +2314,36 @@ def init_bankroll():
             st.session_state.bets = bets
 
 
+def _load_alert_history():
+    try:
+        if os.path.exists(ALERT_HISTORY_FILE):
+            with open(ALERT_HISTORY_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f) or {}
+            return list(data.get("alerts", []))
+    except Exception:
+        pass
+    return []
+
+
+def _save_alert_history() -> bool:
+    try:
+        data = {
+            "alerts": list(st.session_state.get("alert_history", [])),
+            "saved_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "version": VERSION,
+        }
+        with open(ALERT_HISTORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def init_alert_history():
+    if "alert_history" not in st.session_state:
+        st.session_state.alert_history = _load_alert_history()
+
+
 # ── Telegram notifications ────────────────────────────────────────────────────
 def _get_telegram_creds():
     """Ritorna (token, chat_id) con priorità: parametri runtime (session_state) → env."""
@@ -4096,6 +4130,31 @@ def _injury_excludes_player_for_alerts(full_name: str, injuries: list) -> tuple[
     return False, ""
 
 
+def _injury_status_for_alerts(full_name: str, injuries: list) -> str:
+    """Ritorna stato sintetico giocatore per tabella alert: OUT / Q / OK."""
+    tk = _normalize_player_key(full_name)
+    t_parts = tk.split()
+    if len(t_parts) < 2:
+        return "OK"
+    t_first, t_last = t_parts[0], t_parts[-1]
+    for it in injuries or []:
+        ik = _normalize_player_key(it.get("name") or "")
+        i_parts = ik.split()
+        if len(i_parts) < 2:
+            continue
+        i_first, i_last = i_parts[0], i_parts[-1]
+        if i_last != t_last:
+            continue
+        if _first_name_similarity(t_first, i_first) < 0.88:
+            continue
+        status = str(it.get("status", "") or "").lower()
+        if any(k in status for k in ("out", "inactive", "dnp", "suspended")):
+            return "OUT"
+        if any(k in status for k in ("questionable", "probable", "doubt", "gtd")):
+            return "Q"
+    return "OK"
+
+
 def _alert_prop_line_credible(stat_col: str, line_val: float, season_avg: float) -> tuple[bool, str]:
     """Scarta combinazioni probabilmente errate (nome/prop mismatch)."""
     if line_val <= 0 or season_avg <= 0:
@@ -4543,8 +4602,19 @@ def _evaluate_player_value_rows(
         implied = 100 / odd if odd > 1 else 0.0
         edge = prob - implied
         kelly_eur = _kelly_stake(prob, odd, bankroll, kelly_frac)
+        reason_parts = []
+        gap = avg - float(line)
+        if gap >= 2.0:
+            reason_parts.append(f"media +{gap:.1f} sopra linea")
+        if hit >= 60:
+            reason_parts.append(f"hit rate {hit:.0f}%")
+        if edge >= 7:
+            reason_parts.append(f"edge +{edge:.1f}pp")
+        if not reason_parts:
+            reason_parts.append("segnale composito modello")
         rows.append({
             "Giocatore": name,
+            "Stato": "OK",
             "Stat": col,
             "Linea": line,
             "Quota": odd,
@@ -4555,6 +4625,7 @@ def _evaluate_player_value_rows(
             "Hit Rate %": round(hit, 1),
             "Kelly €": kelly_eur,
             "Signal": _value_label(edge),
+            "Motivo alert": " · ".join(reason_parts[:3]),
         })
     return rows
 
@@ -4677,6 +4748,7 @@ def _scan_value_with_real_odds(
                 continue
             team_tid = int(p.get("team_id"))
             injuries_ev = injury_cache.get(team_tid) or []
+            player_status = _injury_status_for_alerts(pname, injuries_ev)
 
             blocked, inj_tag = _injury_excludes_player_for_alerts(pname, injuries_ev)
             if blocked:
@@ -4733,8 +4805,23 @@ def _scan_value_with_real_odds(
                     elif match_kind != "exact":
                         note_txt = f"Variante grafica nome · {match_kind}"
 
+                    reason_parts = []
+                    gap = avg - float(line_val)
+                    if gap >= 2.0:
+                        reason_parts.append(f"media +{gap:.1f} sopra linea")
+                    if hit >= 60:
+                        reason_parts.append(f"hit rate {hit:.0f}%")
+                    if edge >= 7:
+                        reason_parts.append(f"edge +{edge:.1f}pp")
+                    if prob >= 65:
+                        reason_parts.append(f"prob {prob:.0f}%")
+                    if not reason_parts:
+                        reason_parts.append("segnale composito modello")
+                    reason_txt = " · ".join(reason_parts[:3])
+
                     rows.append({
                         "Giocatore": pname,
+                        "Stato": player_status,
                         "Stat": stat_col,
                         "Linea": line_val,
                         "Quota Over": round(float(over_odd), 2),
@@ -4752,6 +4839,7 @@ def _scan_value_with_real_odds(
                         ),
                         "Signal": _value_label(edge),
                         "Match": f"{away_name} @ {home_name}",
+                        "Motivo alert": reason_txt,
                         "Verifica": note_txt,
                         "Quote As Of (UTC)": now_utc.strftime("%Y-%m-%d %H:%M:%S"),
                     })
@@ -4889,6 +4977,9 @@ def value_alerts_page(linee: dict, n_partite: int):
         q4.metric("Scarti mismatch", int((qstats or {}).get("players_name_miss", 0))
                   + int((qstats or {}).get("players_team_miss", 0)))
         st.dataframe(df_auto, width="stretch", hide_index=True)
+        if st.button("💾 Salva questi alert nello storico", key="save_auto_alert_history"):
+            n_saved = _append_alert_history(df_auto, source="Auto Odds API")
+            st.success(f"Storico alert aggiornato: salvate {n_saved} righe.")
 
         top = df_auto.head(5)
         st.markdown("#### 🔥 Top 5 Pick reali")
@@ -4909,6 +5000,8 @@ def value_alerts_page(linee: dict, n_partite: int):
         )
         _telegram_alert_block(df_auto, source="Auto · Odds API",
                               key_prefix="tg_auto", default_top=5)
+        st.markdown("---")
+        _render_alert_history_panel()
         return
 
     # init default odds session keys
@@ -5052,6 +5145,9 @@ def value_alerts_page(linee: dict, n_partite: int):
     if scan_all_today:
         st.caption(f"Filtro orario attivo: {time_mode}")
     st.dataframe(df_alert, width="stretch", hide_index=True)
+    if st.button("💾 Salva questi alert nello storico", key="save_man_alert_history"):
+        n_saved = _append_alert_history(df_alert, source="Manuale")
+        st.success(f"Storico alert aggiornato: salvate {n_saved} righe.")
 
     top = df_alert.head(5)
     st.markdown("#### 🔥 Top 5 Alert")
@@ -5069,6 +5165,8 @@ def value_alerts_page(linee: dict, n_partite: int):
         mime="text/csv",
     )
     _telegram_alert_block(df_alert, source="Manuale", key_prefix="tg_man", default_top=5)
+    st.markdown("---")
+    _render_alert_history_panel()
 
 
 def _telegram_alert_block(df_alert: pd.DataFrame, source: str = "Manuale",
@@ -5110,6 +5208,79 @@ def _telegram_alert_block(df_alert: pd.DataFrame, source: str = "Manuale",
             st.success(f"✅ Inviate {len(df_send)} pick su Telegram. {info}")
         else:
             st.error(f"❌ Invio fallito: {info}")
+
+
+def _append_alert_history(df_alert: pd.DataFrame, source: str):
+    init_alert_history()
+    ts = datetime.datetime.now().isoformat(timespec="seconds")
+    rows = []
+    for _, r in (df_alert if df_alert is not None else pd.DataFrame()).iterrows():
+        rows.append({
+            "Timestamp": ts,
+            "Source": source,
+            "Match": r.get("Match", ""),
+            "Giocatore": r.get("Giocatore", ""),
+            "Stato": r.get("Stato", ""),
+            "Stat": r.get("Stat", ""),
+            "Linea": float(r.get("Linea", 0) or 0),
+            "Quota": float(r.get("Quota Over", r.get("Quota", 0)) or 0),
+            "Prob Over %": float(r.get("Prob Over %", 0) or 0),
+            "Edge %": float(r.get("Edge %", 0) or 0),
+            "Motivo alert": r.get("Motivo alert", ""),
+            "Esito Reale": "In attesa",
+        })
+    st.session_state.alert_history.extend(rows)
+    _save_alert_history()
+    return len(rows)
+
+
+def _render_alert_history_panel():
+    init_alert_history()
+    hist = st.session_state.get("alert_history", [])
+    st.markdown("#### 📚 Storico Alert (con esito reale)")
+    if not hist:
+        st.caption("Nessun alert salvato ancora.")
+        return
+    df_h = pd.DataFrame(hist)
+    if "Esito Reale" not in df_h.columns:
+        df_h["Esito Reale"] = "In attesa"
+    closed = df_h[df_h["Esito Reale"].isin(["Vinto", "Perso"])].copy()
+    if not closed.empty:
+        win_n = int((closed["Esito Reale"] == "Vinto").sum())
+        wr = win_n / len(closed) * 100
+        flat_profit = (
+            ((closed["Quota"] - 1) * (closed["Esito Reale"] == "Vinto").astype(int))
+            - (closed["Esito Reale"] == "Perso").astype(int)
+        ).sum()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Alert chiusi", len(closed))
+        c2.metric("Win rate modello", f"{wr:.0f}%")
+        c3.metric("Profit flat stake (1u)", f"{flat_profit:+.2f}u")
+    else:
+        st.caption("Chiudi alcuni alert (Vinto/Perso) per vedere KPI modello.")
+
+    pend_idx = [i for i, x in enumerate(hist) if str(x.get("Esito Reale", "In attesa")) == "In attesa"]
+    if pend_idx:
+        with st.expander(f"✏️ Aggiorna esito alert pendenti ({len(pend_idx)})", expanded=False):
+            for i in pend_idx[:120]:
+                x = hist[i]
+                row = st.columns([4, 1.2, 1.2])
+                row[0].markdown(
+                    f"**{x.get('Giocatore','?')} {x.get('Stat','')} O{x.get('Linea','?')}** · "
+                    f"{x.get('Match','')} · quota {x.get('Quota','?')} · edge {x.get('Edge %','?')}%"
+                )
+                if row[1].button("✅ Vinto", key=f"ah_win_{i}"):
+                    hist[i]["Esito Reale"] = "Vinto"
+                    _save_alert_history()
+                    st.rerun()
+                if row[2].button("❌ Perso", key=f"ah_lose_{i}"):
+                    hist[i]["Esito Reale"] = "Perso"
+                    _save_alert_history()
+                    st.rerun()
+
+    with st.expander("📋 Vedi storico completo"):
+        cols = [c for c in ["Timestamp", "Source", "Match", "Giocatore", "Stato", "Stat", "Linea", "Quota", "Prob Over %", "Edge %", "Motivo alert", "Esito Reale"] if c in df_h.columns]
+        st.dataframe(df_h[cols].sort_values("Timestamp", ascending=False), width="stretch", hide_index=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -5452,6 +5623,20 @@ def home_page():
     s3.metric("Telegram", "🟢 OK" if (_tk and _ch) else "⚪ Off")
     bets_n = len(st.session_state.get("bets", []))
     s4.metric("Scommesse registrate", bets_n)
+    bets_today = st.session_state.get("bets", [])
+    if bets_today:
+        dfh = pd.DataFrame(bets_today)
+        if "Data" in dfh.columns:
+            dfh["Data"] = pd.to_datetime(dfh["Data"], errors="coerce")
+            today = pd.Timestamp(datetime.date.today())
+            day_rows = dfh[dfh["Data"] >= today].copy()
+            chiuse_day = day_rows[day_rows.get("Risultato", "In attesa") != "In attesa"] if not day_rows.empty else pd.DataFrame()
+            pnl_day = float(chiuse_day.get("P&L €", pd.Series(dtype=float)).sum()) if not chiuse_day.empty else 0.0
+            stake_exp = float(day_rows[day_rows.get("Risultato", "In attesa") == "In attesa"].get("Stake €", pd.Series(dtype=float)).sum()) if not day_rows.empty else 0.0
+            s5, s6, s7 = st.columns(3)
+            s5.metric("Pick oggi", len(day_rows))
+            s6.metric("Stake esposto", f"€{stake_exp:.2f}")
+            s7.metric("P&L oggi", f"{pnl_day:+.2f} €")
     st.caption("⚠️ NBA Whale Pro è uno strumento di analisi statistica. "
                "Non costituisce consulenza finanziaria. Gioca responsabilmente.")
 
