@@ -5968,31 +5968,44 @@ def value_alerts_page(linee: dict, n_partite: int):
             "Ottimistica (quota massima)": "best",
         }
 
-        if not st.button("🔎 Scansiona linee reali"):
+        scan_real_btn = st.button("🔎 Scansiona linee reali")
+        if scan_real_btn:
+            if not odds_key:
+                st.error("Inserisci l'API key di The Odds API per la modalità auto.")
+                return
+            with st.spinner("Scarico eventi NBA, props e calcolo value..."):
+                df_auto, err, qstats = _scan_value_with_real_odds(
+                    api_key=odds_key,
+                    n_partite=n_partite,
+                    phase_selected=phase_selected,
+                    bankroll=float(bankroll_for_kelly_a),
+                    kelly_frac=float(kelly_fraction_a),
+                    min_edge=float(min_edge_a),
+                    min_hit=float(min_hit_a),
+                    time_mode=time_mode_a,
+                    odds_pick_mode=odds_mode_map.get(odds_mode_label, "conservative"),
+                    bookmaker_filter=bookmaker_filter,
+                    kelly_cap_pct=float(kelly_cap_pct_a),
+                )
+            if err:
+                st.warning(err)
+                return
+            st.session_state["_alert_auto_df"] = df_auto.copy()
+            st.session_state["_alert_auto_qstats"] = dict(qstats or {})
+        elif "_alert_auto_df" in st.session_state:
+            df_auto = st.session_state["_alert_auto_df"]
+            qstats = st.session_state.get("_alert_auto_qstats") or {}
+        else:
             st.info("Premi per scaricare linee/quote reali e generare alert.")
             return
-        if not odds_key:
-            st.error("Inserisci l'API key di The Odds API per la modalità auto.")
-            return
 
-        with st.spinner("Scarico eventi NBA, props e calcolo value..."):
-            df_auto, err, qstats = _scan_value_with_real_odds(
-                api_key=odds_key,
-                n_partite=n_partite,
-                phase_selected=phase_selected,
-                bankroll=float(bankroll_for_kelly_a),
-                kelly_frac=float(kelly_fraction_a),
-                min_edge=float(min_edge_a),
-                min_hit=float(min_hit_a),
-                time_mode=time_mode_a,
-                odds_pick_mode=odds_mode_map.get(odds_mode_label, "conservative"),
-                bookmaker_filter=bookmaker_filter,
-                kelly_cap_pct=float(kelly_cap_pct_a),
+        if scan_real_btn:
+            st.success(f"Trovate {len(df_auto)} value bet OVER reali (linee + quote da bookmakers).")
+        else:
+            st.caption(
+                f"Stai vedendo l'ultima scansione (**{len(df_auto)}** alert). "
+                "Riclicca **Scansiona** per aggiornare; serve per usare anche **Salva** e Telegram senza perdere la tabella."
             )
-        if err:
-            st.warning(err)
-            return
-        st.success(f"Trovate {len(df_auto)} value bet OVER reali (linee + quote da bookmakers).")
         st.info(
             "**Controlli anti-errore:** le props del bookmaker si collegano al roster solo se **nome e cognome** "
             "coincidono (mai solo il cognome: evita linee scambiate tipo Jalen/Jaylin Williams). "
@@ -6084,99 +6097,114 @@ def value_alerts_page(linee: dict, n_partite: int):
         key="alert_time_mode",
     )
 
-    if not st.button("🔎 Genera Alert Value"):
+    gen_alert_btn = st.button("🔎 Genera Alert Value")
+    df_alert = None
+    scope_lbl = ""
+    if gen_alert_btn:
+        odds = {"PTS": odd_pts, "REB": odd_reb, "AST": odd_ast}
+        rows = []
+        with st.spinner("Analisi value in corso..."):
+            team_ids_to_scan = []
+            team_label_by_id = {}
+            if scan_all_today:
+                if time_mode == "Prossime 6h":
+                    games_today = fetch_games_window(6)
+                elif time_mode == "Prossime 12h":
+                    games_today = fetch_games_window(12)
+                elif time_mode == "Prossime 24h":
+                    games_today = fetch_games_window(24)
+                else:
+                    today_iso = str(datetime.date.today())
+                    games_today = fetch_games_by_date(today_iso)
+                ids = []
+                for g in games_today:
+                    tm = g.get("teams", {}) or {}
+                    home = tm.get("home", {}) or {}
+                    vis = tm.get("visitors", {}) or {}
+                    is_finished, is_not_started, _ = _game_status_flags(g)
+                    # hard filter: escludi sempre partite finite nello scanner giornaliero
+                    if is_finished:
+                        continue
+                    # se richiesto, considera solo non iniziate
+                    if time_mode == "Solo non iniziate" and not is_not_started:
+                            continue
+                    hid = home.get("id")
+                    vid = vis.get("id")
+                    if hid:
+                        ids.append(int(hid))
+                        team_label_by_id[int(hid)] = home.get("name") or home.get("code") or f"ID {hid}"
+                    if vid:
+                        ids.append(int(vid))
+                        team_label_by_id[int(vid)] = vis.get("name") or vis.get("code") or f"ID {vid}"
+                # dedup preservando ordine
+                seen_ids = set()
+                for tid in ids:
+                    if tid not in seen_ids:
+                        seen_ids.add(tid)
+                        team_ids_to_scan.append(tid)
+                if not team_ids_to_scan:
+                    st.warning("Nessuna partita trovata nel filtro orario. Uso Team 1 + Team 2.")
+                    team_ids_to_scan = [int(team1_id), int(team2_id)]
+                team_ids_to_scan = team_ids_to_scan[:max_teams_today]
+            else:
+                team_ids_to_scan = [int(team1_id), int(team2_id)]
+
+            candidates = []
+            for tid in team_ids_to_scan:
+                roster = fetch_team_players(int(tid), SEASON)[:max_players]
+                for p in roster:
+                    pid = p.get("id")
+                    name = p.get("name")
+                    if pid and name:
+                        candidates.append((name, int(pid), tid))
+            # dedup
+            seen = set()
+            unique_candidates = []
+            for n, pid, tid in candidates:
+                if pid not in seen:
+                    seen.add(pid)
+                    unique_candidates.append((n, pid, tid))
+
+            for n, pid, tid in unique_candidates:
+                player_rows = _evaluate_player_value_rows(
+                    n, pid, linee, odds, n_partite, phase_selected,
+                    expected_team_id=int(tid),
+                    bankroll=float(bankroll_for_kelly),
+                    kelly_frac=float(kelly_fraction),
+                )
+                team_name = team_label_by_id.get(tid, f"Team {tid}")
+                for pr in player_rows:
+                    pr["Team"] = team_name
+                    rows.append(pr)
+
+        if not rows:
+            st.warning("Nessun alert disponibile: verifica roster/API o allarga i filtri.")
+            return
+
+        df_alert = pd.DataFrame(rows)
+        df_alert = df_alert[(df_alert["Edge %"] >= min_edge) & (df_alert["Hit Rate %"] >= min_hit)]
+        if df_alert.empty:
+            st.warning("Nessuna value bet con i filtri correnti. Prova a ridurre le soglie.")
+            return
+        df_alert = df_alert.sort_values(["Edge %", "Prob Over %"], ascending=False).reset_index(drop=True)
+        scope_lbl = "all teams today" if scan_all_today else f"{team1_label} + {team2_label}"
+        st.session_state["_alert_man_df"] = df_alert.copy()
+        st.session_state["_alert_man_scope_lbl"] = scope_lbl
+    elif "_alert_man_df" in st.session_state:
+        df_alert = st.session_state["_alert_man_df"]
+        scope_lbl = str(st.session_state.get("_alert_man_scope_lbl", "") or "")
+    else:
         st.info("Premi il pulsante per calcolare le migliori value bet della giornata.")
         return
 
-    odds = {"PTS": odd_pts, "REB": odd_reb, "AST": odd_ast}
-    with st.spinner("Analisi value in corso..."):
-        team_ids_to_scan = []
-        team_label_by_id = {}
-        if scan_all_today:
-            if time_mode == "Prossime 6h":
-                games_today = fetch_games_window(6)
-            elif time_mode == "Prossime 12h":
-                games_today = fetch_games_window(12)
-            elif time_mode == "Prossime 24h":
-                games_today = fetch_games_window(24)
-            else:
-                today_iso = str(datetime.date.today())
-                games_today = fetch_games_by_date(today_iso)
-            ids = []
-            for g in games_today:
-                tm = g.get("teams", {}) or {}
-                home = tm.get("home", {}) or {}
-                vis = tm.get("visitors", {}) or {}
-                is_finished, is_not_started, _ = _game_status_flags(g)
-                # hard filter: escludi sempre partite finite nello scanner giornaliero
-                if is_finished:
-                    continue
-                # se richiesto, considera solo non iniziate
-                if time_mode == "Solo non iniziate" and not is_not_started:
-                        continue
-                hid = home.get("id")
-                vid = vis.get("id")
-                if hid:
-                    ids.append(int(hid))
-                    team_label_by_id[int(hid)] = home.get("name") or home.get("code") or f"ID {hid}"
-                if vid:
-                    ids.append(int(vid))
-                    team_label_by_id[int(vid)] = vis.get("name") or vis.get("code") or f"ID {vid}"
-            # dedup preservando ordine
-            seen_ids = set()
-            for tid in ids:
-                if tid not in seen_ids:
-                    seen_ids.add(tid)
-                    team_ids_to_scan.append(tid)
-            if not team_ids_to_scan:
-                st.warning("Nessuna partita trovata nel filtro orario. Uso Team 1 + Team 2.")
-                team_ids_to_scan = [int(team1_id), int(team2_id)]
-            team_ids_to_scan = team_ids_to_scan[:max_teams_today]
-        else:
-            team_ids_to_scan = [int(team1_id), int(team2_id)]
-
-        candidates = []
-        for tid in team_ids_to_scan:
-            roster = fetch_team_players(int(tid), SEASON)[:max_players]
-            for p in roster:
-                pid = p.get("id")
-                name = p.get("name")
-                if pid and name:
-                    candidates.append((name, int(pid), tid))
-        # dedup
-        seen = set()
-        unique_candidates = []
-        for n, pid, tid in candidates:
-            if pid not in seen:
-                seen.add(pid)
-                unique_candidates.append((n, pid, tid))
-
-        rows = []
-        for n, pid, tid in unique_candidates:
-            player_rows = _evaluate_player_value_rows(
-                n, pid, linee, odds, n_partite, phase_selected,
-                expected_team_id=int(tid),
-                bankroll=float(bankroll_for_kelly),
-                kelly_frac=float(kelly_fraction),
-            )
-            team_name = team_label_by_id.get(tid, f"Team {tid}")
-            for pr in player_rows:
-                pr["Team"] = team_name
-                rows.append(pr)
-
-    if not rows:
-        st.warning("Nessun alert disponibile: verifica roster/API o allarga i filtri.")
-        return
-
-    df_alert = pd.DataFrame(rows)
-    df_alert = df_alert[(df_alert["Edge %"] >= min_edge) & (df_alert["Hit Rate %"] >= min_hit)]
-    if df_alert.empty:
-        st.warning("Nessuna value bet con i filtri correnti. Prova a ridurre le soglie.")
-        return
-    df_alert = df_alert.sort_values(["Edge %", "Prob Over %"], ascending=False).reset_index(drop=True)
-
-    scope_lbl = "all teams today" if scan_all_today else f"{team1_label} + {team2_label}"
-    st.success(f"Trovate {len(df_alert)} opportunità value ({scope_lbl}).")
+    if gen_alert_btn:
+        st.success(f"Trovate {len(df_alert)} opportunità value ({scope_lbl}).")
+    else:
+        st.caption(
+            f"Ultimi alert generati (**{len(df_alert)}** righe"
+            + (f", ambito `{scope_lbl}`" if scope_lbl else "")
+            + "). Riclicca **Genera** per ricalcolare; così puoi salvare/Telegram senza perdere la tabella."
+        )
     if scan_all_today:
         st.caption(f"Filtro orario attivo: {time_mode}")
     st.dataframe(df_alert, width="stretch", hide_index=True)
@@ -6265,7 +6293,11 @@ def _append_alert_history(df_alert: pd.DataFrame, source: str):
             "Esito Reale": "In attesa",
         })
     st.session_state.alert_history.extend(rows)
-    _save_alert_history()
+    if not _save_alert_history():
+        st.warning(
+            "Alert aggiunti allo storico **in sessione**, ma il file sul disco non è stato scritto "
+            "(permessi/host di sola lettura). Su Streamlit Cloud lo storico può non sopravvivere al refresh."
+        )
     return len(rows)
 
 
